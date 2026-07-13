@@ -1,0 +1,289 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag in vMAJOR.MINOR.PATCH form
+        required: true
+        type: string
+      commit_sha:
+        description: Full 40-character commit SHA referenced by the release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tailscale-gateway-agent-release
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.26.5"
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  validate:
+    name: Validate release identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      created: ${{ steps.release.outputs.created }}
+      image: ${{ steps.release.outputs.image }}
+      image_tag: ${{ steps.release.outputs.image_tag }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      workflow_identity: ${{ steps.release.outputs.workflow_identity }}
+    steps:
+      - name: Checkout requested commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+
+      - name: Validate tag and commit
+        id: release
+        env:
+          DISPATCH_COMMIT: ${{ inputs.commit_sha }}
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            [[ "${GITHUB_REF}" == "refs/heads/main" ]] || { echo "manual releases must run from main"; exit 1; }
+            commit="${DISPATCH_COMMIT}"
+            release_tag="${DISPATCH_TAG}"
+            workflow_ref="refs/heads/main"
+          else
+            commit="$(git rev-parse HEAD)"
+            release_tag="${GITHUB_REF_NAME}"
+            [[ "${GITHUB_REF}" == "refs/tags/${release_tag}" ]] || { echo "tag release ref is inconsistent"; exit 1; }
+            workflow_ref="${GITHUB_REF}"
+          fi
+
+          [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || { echo "commit_sha must be a full lowercase commit SHA"; exit 1; }
+          [[ "${release_tag}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] || { echo "release tag is not valid semantic versioning"; exit 1; }
+          [[ "$(git rev-parse HEAD)" == "${commit}" ]] || { echo "checkout does not match requested commit"; exit 1; }
+
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "${commit}" refs/remotes/origin/main || { echo "release commit is not reachable from origin/main"; exit 1; }
+          tag_commit="$(git rev-list -n 1 "refs/tags/${release_tag}")"
+          [[ "${tag_commit}" == "${commit}" ]] || { echo "release tag does not reference requested commit"; exit 1; }
+
+          repository="${GITHUB_REPOSITORY,,}"
+          {
+            printf 'commit=%s\n' "${commit}"
+            printf 'created=%s\n' "$(git show -s --format=%cI "${commit}")"
+            printf 'image=ghcr.io/%s\n' "${repository}"
+            printf 'image_tag=%s\n' "${release_tag#v}"
+            printf 'release_tag=%s\n' "${release_tag}"
+            printf 'workflow_identity=https://github.com/%s/.github/workflows/release.yaml@%s\n' "${GITHUB_REPOSITORY}" "${workflow_ref}"
+          } >> "${GITHUB_OUTPUT}"
+
+  verification:
+    name: Release source and Linux verification
+    needs: validate
+    uses: ./.github/workflows/verify.yaml
+    with:
+      ref: ${{ needs.validate.outputs.commit }}
+
+  publish:
+    name: Publish and verify OCI image
+    needs:
+      - validate
+      - verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      artifact-metadata: write
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout validated commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish unique release candidate
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ needs.validate.outputs.image }}:candidate-${{ needs.validate.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.created=${{ needs.validate.outputs.created }}
+            org.opencontainers.image.revision=${{ needs.validate.outputs.commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.release_tag }}
+          build-args: |
+            VERSION=${{ needs.validate.outputs.release_tag }}
+            COMMIT=${{ needs.validate.outputs.commit }}
+            BUILD_DATE=${{ needs.validate.outputs.created }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest build provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ needs.validate.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.1
+
+      - name: Sign immutable image digest
+        env:
+          IMAGE: ${{ needs.validate.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${IMAGE_DIGEST}"
+
+      - name: Install pinned registry inspection tool
+        run: |
+          mkdir -p "${RUNNER_TEMP}/go-tools/bin"
+          GOBIN="${RUNNER_TEMP}/go-tools/bin" go install github.com/google/go-containerregistry/cmd/crane@v0.21.7
+
+      - name: Verify registry content and image runtime contract
+        env:
+          CANDIDATE_TAG: candidate-${{ needs.validate.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          COMMIT: ${{ needs.validate.outputs.commit }}
+          CREATED: ${{ needs.validate.outputs.created }}
+          IMAGE: ${{ needs.validate.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+        run: |
+          crane="${RUNNER_TEMP}/go-tools/bin/crane"
+          observed_digest="$("${crane}" digest "${IMAGE}:${CANDIDATE_TAG}")"
+          [[ "${observed_digest}" == "${IMAGE_DIGEST}" ]] || { echo "candidate tag digest mismatch"; exit 1; }
+
+          "${crane}" manifest "${IMAGE}@${IMAGE_DIGEST}" > "${RUNNER_TEMP}/index.json"
+          jq -e '
+            [.manifests[] | select(.platform.os == "linux") | (.platform.os + "/" + .platform.architecture)]
+            | sort == ["linux/amd64", "linux/arm64"]
+          ' "${RUNNER_TEMP}/index.json" >/dev/null
+
+          attestation_count=0
+          while read -r attestation_digest; do
+            attestation_count=$((attestation_count + 1))
+            "${crane}" manifest "${IMAGE}@${attestation_digest}" > "${RUNNER_TEMP}/attestation.json"
+            jq -e '
+              [.layers[].annotations["in-toto.io/predicate-type"]] as $types |
+              any($types[]; . == "https://spdx.dev/Document") and
+              any($types[]; startswith("https://slsa.dev/provenance/"))
+            ' "${RUNNER_TEMP}/attestation.json" >/dev/null
+          done < <(jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' "${RUNNER_TEMP}/index.json")
+          [[ "${attestation_count}" -eq 2 ]] || { echo "SBOM/provenance attestations are incomplete"; exit 1; }
+
+          platform_count=0
+          while IFS=$'\t' read -r platform manifest_digest; do
+            platform_count=$((platform_count + 1))
+            "${crane}" config "${IMAGE}@${manifest_digest}" > "${RUNNER_TEMP}/config.json"
+            jq -e --arg commit "${COMMIT}" --arg created "${CREATED}" --arg version "${RELEASE_TAG}" '
+              .config.User == "65532:65532" and
+              .config.Entrypoint == ["/tailscale-gateway-agent"] and
+              .config.Cmd == ["run"] and
+              .config.Labels["org.opencontainers.image.revision"] == $commit and
+              .config.Labels["org.opencontainers.image.created"] == $created and
+              .config.Labels["org.opencontainers.image.version"] == $version and
+              ((.config.Env // []) | all(startswith("TS_") | not))
+            ' "${RUNNER_TEMP}/config.json" >/dev/null
+
+            output="$(docker run --rm --platform "${platform}" "${IMAGE}@${manifest_digest}" version)"
+            [[ "${output}" == *"commit=${COMMIT}"* ]] || { echo "${platform} runtime metadata mismatch"; exit 1; }
+          done < <(jq -r '.manifests[] | select(.platform.os == "linux") | [(.platform.os + "/" + .platform.architecture), .digest] | @tsv' "${RUNNER_TEMP}/index.json")
+          [[ "${platform_count}" -eq 2 ]] || { echo "unexpected runnable platform count"; exit 1; }
+
+      - name: Verify keyless signature and provenance
+        env:
+          IMAGE: ${{ needs.validate.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          WORKFLOW_IDENTITY: ${{ needs.validate.outputs.workflow_identity }}
+        run: |
+          issuer='https://token.actions.githubusercontent.com'
+          cosign verify --certificate-identity "${WORKFLOW_IDENTITY}" --certificate-oidc-issuer "${issuer}" "${IMAGE}@${IMAGE_DIGEST}" >/dev/null
+          cosign verify-attestation --type slsaprovenance --certificate-identity "${WORKFLOW_IDENTITY}" --certificate-oidc-issuer "${issuer}" "${IMAGE}@${IMAGE_DIGEST}" >/dev/null
+
+      - name: Publish immutable release metadata
+        env:
+          COMMIT: ${{ needs.validate.outputs.commit }}
+          CREATED: ${{ needs.validate.outputs.created }}
+          IMAGE: ${{ needs.validate.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+        run: |
+          # The single-quoted program intentionally preserves jq variables.
+          # shellcheck disable=SC2016
+          jq -n \
+            --arg image "${IMAGE}" \
+            --arg digest "${IMAGE_DIGEST}" \
+            --arg commit "${COMMIT}" \
+            --arg created "${CREATED}" \
+            --arg release "${RELEASE_TAG}" \
+            '{schema: 1, image: $image, digest: $digest, commit: $commit, created: $created, release: $release, platforms: ["linux/amd64", "linux/arm64"]}' \
+            > release-metadata.json
+          {
+            printf '## Immutable Agent image\n\n'
+            printf "\`%s@%s\`\n\n" "${IMAGE}" "${IMAGE_DIGEST}"
+            printf "Commit: \`%s\`  \nRelease: \`%s\`\n" "${COMMIT}" "${RELEASE_TAG}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload release metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-metadata-${{ needs.validate.outputs.release_tag }}
+          path: release-metadata.json
+          if-no-files-found: error
+          retention-days: 90
+
+      # This must remain the final step. All source, platform, metadata,
+      # signature, provenance, and runtime verification completes before the
+      # public semver tag becomes visible; no external write follows it.
+      - name: Promote verified release tag
+        env:
+          IMAGE: ${{ needs.validate.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAG: ${{ needs.validate.outputs.image_tag }}
+        run: |
+          crane="${RUNNER_TEMP}/go-tools/bin/crane"
+          if existing_digest="$("${crane}" digest "${IMAGE}:${IMAGE_TAG}" 2>/dev/null)"; then
+            [[ "${existing_digest}" == "${IMAGE_DIGEST}" ]] || { echo "refusing to overwrite immutable release tag"; exit 1; }
+          else
+            "${crane}" tag "${IMAGE}@${IMAGE_DIGEST}" "${IMAGE_TAG}"
+          fi
+          [[ "$("${crane}" digest "${IMAGE}:${IMAGE_TAG}")" == "${IMAGE_DIGEST}" ]] || { echo "release tag promotion did not converge"; exit 1; }
