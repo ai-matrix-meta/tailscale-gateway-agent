@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  verification:
+    name: Source and Linux verification
+    uses: ./.github/workflows/verify.yaml
+    with:
+      ref: ${{ github.sha }}
+
+  image:
+    name: OCI build validation
+    needs:
+      - verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Derive deterministic build metadata
+        id: metadata
+        run: printf 'created=%s\n' "$(git show -s --format=%cI HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Build multi-platform scratch image without publishing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: tailscale-gateway-agent:ci
+          build-args: |
+            VERSION=ci
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.metadata.outputs.created }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Load amd64 scratch image for runtime validation
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: tailscale-gateway-agent:ci-runtime
+          build-args: |
+            VERSION=ci
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.metadata.outputs.created }}
+          cache-from: type=gha
+
+      - name: Verify scratch runtime and certificate trust
+        run: |
+          container_id="$(docker create tailscale-gateway-agent:ci-runtime version)"
+          trap 'docker rm -f "${container_id}" >/dev/null 2>&1 || true' EXIT
+          bundle="${RUNNER_TEMP}/image-ca-certificates.crt"
+          empty_cert_dir="${RUNNER_TEMP}/empty-cert-directory"
+          mkdir -p "${empty_cert_dir}"
+          docker cp "${container_id}:/etc/ssl/certs/ca-certificates.crt" "${bundle}"
+          test -s "${bundle}"
+          output="$(docker start -a "${container_id}")"
+          [[ "${output}" == *"version=ci"* ]] || { echo "scratch image did not run the expected Agent build"; exit 1; }
+          SSL_CERT_FILE="${bundle}" SSL_CERT_DIR="${empty_cert_dir}" \
+            go test -count=1 -run '^TestSystemTrustStoreContainsCertificates$' ./internal/adapter/internetprobe

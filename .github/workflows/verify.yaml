@@ -1,0 +1,147 @@
+name: reusable-verification
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Full commit SHA to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  identity:
+    name: Verify immutable source identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.identity.outputs.commit }}
+    steps:
+      - name: Checkout requested commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+
+      - name: Verify full commit identity
+        id: identity
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+        run: |
+          [[ "${REQUESTED_REF}" =~ ^[0-9a-f]{40}$ ]] || { echo "verification ref must be a full lowercase commit SHA"; exit 1; }
+          observed="$(git rev-parse HEAD)"
+          [[ "${observed}" == "${REQUESTED_REF}" ]] || { echo "checkout does not match verification ref"; exit 1; }
+          printf 'commit=%s\n' "${observed}" >> "${GITHUB_OUTPUT}"
+
+  quality:
+    name: Source quality
+    needs: identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout verified commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.identity.outputs.commit }}
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            printf 'The following files are not gofmt formatted:\n%s\n' "${unformatted}"
+            exit 1
+          fi
+
+      - name: Verify module integrity
+        run: go mod verify
+
+      - name: Verify module graph is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Run unit tests
+        run: go test -count=1 ./...
+
+      - name: Run race detector
+        run: go test -race -count=1 ./...
+
+      - name: Run Go vet
+        run: go vet ./...
+
+      - name: Install pinned analysis tools
+        run: |
+          mkdir -p "${RUNNER_TEMP}/go-tools/bin"
+          printf '%s\n' "${RUNNER_TEMP}/go-tools/bin" >> "${GITHUB_PATH}"
+          GOBIN="${RUNNER_TEMP}/go-tools/bin" go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          GOBIN="${RUNNER_TEMP}/go-tools/bin" go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          GOBIN="${RUNNER_TEMP}/go-tools/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Lint GitHub Actions workflows
+        run: actionlint -color .github/workflows/*.yaml
+
+      - name: Run staticcheck
+        run: staticcheck ./...
+
+      - name: Run vulnerability analysis
+        run: govulncheck ./...
+
+      - name: Build static Linux binaries
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=readonly -buildvcs=false -trimpath -tags=netgo,osusergo -ldflags='-s -w -buildid=' -o "${RUNNER_TEMP}/agent-amd64" ./cmd/tailscale-gateway-agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -buildvcs=false -trimpath -tags=netgo,osusergo -ldflags='-s -w -buildid=' -o "${RUNNER_TEMP}/agent-arm64" ./cmd/tailscale-gateway-agent
+          file "${RUNNER_TEMP}/agent-amd64" "${RUNNER_TEMP}/agent-arm64"
+
+  integration:
+    name: Linux network integration
+    needs: identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout verified commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.identity.outputs.commit }}
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Compile integration test binaries
+        run: |
+          go test -mod=readonly -tags=integration -c -o "${RUNNER_TEMP}/internetprobe-integration.test" ./internal/adapter/internetprobe
+          go test -mod=readonly -tags=integration -c -o "${RUNNER_TEMP}/netlink-integration.test" ./internal/adapter/netlink
+          go test -mod=readonly -tags=integration -c -o "${RUNNER_TEMP}/nftables-integration.test" ./internal/adapter/nftables
+          go test -mod=readonly -tags=integration -c -o "${RUNNER_TEMP}/runtime-integration.test" ./integration
+
+      - name: Run capability socket tests in an isolated network namespace
+        run: sudo -n unshare --net -- "${RUNNER_TEMP}/internetprobe-integration.test" -test.v -test.count=1 -test.timeout=2m
+
+      - name: Run netlink tests in an isolated network namespace
+        run: sudo -n unshare --net -- "${RUNNER_TEMP}/netlink-integration.test" -test.v -test.count=1 -test.timeout=2m
+
+      - name: Run nftables tests in an isolated network namespace
+        run: sudo -n unshare --net -- "${RUNNER_TEMP}/nftables-integration.test" -test.v -test.count=1 -test.timeout=2m
+
+      - name: Run complete runtime convergence in an isolated network namespace
+        run: sudo -n unshare --net -- "${RUNNER_TEMP}/runtime-integration.test" -test.v -test.count=1 -test.timeout=2m
