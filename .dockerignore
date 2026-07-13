@@ -1,0 +1,9 @@
+.git
+.github
+.gitignore
+coverage.out
+dist
+*.test
+README.md
+SECURITY.md
+docs
