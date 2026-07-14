@@ -136,7 +136,16 @@ func (adapter *Adapter) Probe(ctx context.Context, request port.InternetEgressPr
 }
 
 func (adapter *Adapter) resolve(ctx context.Context, target endpoint) ([]netip.Addr, error) {
-	addresses, err := adapter.resolver.LookupNetIP(ctx, "ip", target.hostname)
+	var network string
+	switch target.family {
+	case domain.IPv4:
+		network = "ip4"
+	case domain.IPv6:
+		network = "ip6"
+	default:
+		return nil, fmt.Errorf("resolve capability endpoint: unsupported address family %d", target.family)
+	}
+	addresses, err := adapter.resolver.LookupNetIP(ctx, network, target.hostname)
 	if err != nil {
 		return nil, fmt.Errorf("resolve capability endpoint: %w", err)
 	}

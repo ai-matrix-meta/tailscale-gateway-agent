@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -82,6 +83,39 @@ func TestValidateResolvedAddressesRequiresExclusivePublicFamily(t *testing.T) {
 	}
 	if _, err := validateResolvedAddresses(tooMany, domain.IPv4); err == nil {
 		t.Fatal("unbounded DNS answer set was accepted")
+	}
+}
+
+func TestResolveScopesDualStackEndpointToRequestedFamily(t *testing.T) {
+	adapter, err := New(
+		"https://cp.cloudflare.com/generate_204",
+		"https://cp.cloudflare.com/generate_204",
+		time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &familyResolver{
+		addresses: map[string][]netip.Addr{
+			"ip4": {netip.MustParseAddr("104.16.132.229")},
+			"ip6": {netip.MustParseAddr("2606:4700::6810:84e5")},
+		},
+	}
+	adapter.resolver = resolver
+
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		addresses, resolveErr := adapter.resolve(context.Background(), adapter.endpoints[family])
+		if resolveErr != nil {
+			t.Fatalf("resolve IPv%d endpoint: %v", family, resolveErr)
+		}
+		if len(addresses) != 1 || domain.FamilyOfAddress(addresses[0]) != family {
+			t.Fatalf("IPv%d resolution returned unexpected addresses: %v", family, addresses)
+		}
+	}
+
+	wantLookups := []string{"ip4:cp.cloudflare.com", "ip6:cp.cloudflare.com"}
+	if !slices.Equal(resolver.lookups, wantLookups) {
+		t.Fatalf("family-scoped lookups = %v, want %v", resolver.lookups, wantLookups)
 	}
 }
 
@@ -200,6 +234,16 @@ func newTestAdapter(t *testing.T, server *httptest.Server) *Adapter {
 type fakeResolver struct {
 	addresses map[string][]netip.Addr
 	err       error
+}
+
+type familyResolver struct {
+	addresses map[string][]netip.Addr
+	lookups   []string
+}
+
+func (resolver *familyResolver) LookupNetIP(_ context.Context, network, hostname string) ([]netip.Addr, error) {
+	resolver.lookups = append(resolver.lookups, network+":"+hostname)
+	return resolver.addresses[network], nil
 }
 
 func (resolver *fakeResolver) LookupNetIP(_ context.Context, _, hostname string) ([]netip.Addr, error) {

@@ -229,8 +229,9 @@ adapter must enforce all of the following:
 2. Reject every redirect.
 3. Use the system trust store with normal hostname verification and TLS 1.2 or
    newer. `InsecureSkipVerify` is prohibited.
-4. Resolve both A and AAAA records. The IPv4 target must have only IPv4
-   results; the IPv6 target must have only IPv6 results.
+4. Resolve only the requested address family (`ip4` or `ip6`). A dual-stack
+   endpoint, including the same URL for both configured probes, is valid
+   because each probe receives only its requested family.
 5. Require at least one and at most a small fixed number of addresses.
 6. Reject unspecified, loopback, private, link-local, multicast, CGNAT,
    benchmarking, documentation, and other non-Internet destinations.
@@ -396,7 +397,8 @@ Unit and deterministic adapter tests must cover:
 
 - strict endpoint parsing and missing conditional configuration;
 - unknown, duplicate, empty, and cross-field environment errors;
-- public single-family DNS acceptance and mixed/reserved rejection;
+- family-scoped dual-stack DNS acceptance and mixed/reserved resolver-result
+  rejection;
 - address pinning, redirect rejection, TLS verification, exact 204 response,
   empty body, timeout, cancellation, and size limits;
 - `SO_MARK` and device binding through Linux-tagged socket tests;

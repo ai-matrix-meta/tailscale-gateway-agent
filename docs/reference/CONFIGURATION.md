@@ -104,6 +104,8 @@ is disabled, both variables must be absent. Endpoints have no program default
 and remain cluster-owned production decisions. Their static URL, timing, and
 threshold contracts and their runtime DNS/TLS/HTTP requirements are defined in
 [Exit capability and route approval](../architecture/EXIT-CAPABILITY.md).
+The two fields may use the same dual-stack URL; each probe resolves and dials
+only its requested address family.
 
 ## Reconciliation Runtime
 
