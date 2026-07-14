@@ -19,8 +19,11 @@ adapter calls.
   metadata define the exact writable identity set.
 - Foreign state inside an owned identity is a conflict and is never adopted or
   deleted.
-- Uncertain route discovery, lost coordination, failed readback, and timeouts
-  close forwarding, converge blackhole fallbacks, and clear advertisements.
+- Live failures close forwarding, blackhole Exit selectors, and clear
+  advertisements. The local-control recovery lane remains active only after
+  fresh resolver, proxy-TUN, marking, routing-readback, and kernel validation.
+- Lost coordination and shutdown always blackhole both managed policy tables;
+  they never retain the live recovery lane.
 - No-drift reconciliation invokes no writer.
 
 ## Packet Mark Ownership

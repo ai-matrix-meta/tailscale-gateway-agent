@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -77,6 +78,9 @@ func TestRunnerConvergesWithoutSelfEventsAndRepairsExternalDrift(t *testing.T) {
 	resolver := &staticDNSResolver{nameServers: []netip.Addr{
 		netip.MustParseAddr("10.42.80.53"),
 		netip.MustParseAddr("fd00:80::53"),
+	}, resolved: []netip.Addr{
+		netip.MustParseAddr("192.0.2.10"),
+		netip.MustParseAddr("2001:db8::10"),
 	}}
 	tailnet := &staticTailnetControl{state: domain.TailnetState{
 		Running: true, KernelTunnel: true,
@@ -99,6 +103,24 @@ func TestRunnerConvergesWithoutSelfEventsAndRepairsExternalDrift(t *testing.T) {
 	if err := controller.Prepare(context.Background()); err != nil {
 		t.Fatalf("prepare controller: %v", err)
 	}
+	tailnet.mutex.Lock()
+	tailnet.state.Control.InNetworkMap = false
+	tailnet.mutex.Unlock()
+	if _, err := controller.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
+		t.Fatalf("unavailable bootstrap state was accepted: %v", err)
+	}
+	failClosedReport, err := controller.FailClosed(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
+		t.Fatalf("live fail-closed state did not report unavailable Tailnet control: %v", err)
+	}
+	if failClosedReport.Changed || failClosedReport.RoutingWrites != 0 || failClosedReport.PacketFilterWrites != 0 || failClosedReport.TailnetWrites != 0 {
+		t.Fatalf("verified bootstrap recovery path was rewritten: %#v", failClosedReport)
+	}
+	assertLocalControlRecoveryRouting(t, network, configuration)
+	tailnet.mutex.Lock()
+	tailnet.state.Control.InNetworkMap = true
+	tailnet.state.Control.ObservedAt = time.Now()
+	tailnet.mutex.Unlock()
 
 	status := application.NewStatus(configuration.Runtime.ReadinessMaximumAge)
 	metrics := newRecordingMetrics()
@@ -147,6 +169,45 @@ func TestRunnerConvergesWithoutSelfEventsAndRepairsExternalDrift(t *testing.T) {
 	}
 }
 
+func assertLocalControlRecoveryRouting(t *testing.T, store port.RoutingStore, configuration domain.Configuration) {
+	t.Helper()
+	state, err := store.ReadRouting(context.Background(), domain.RoutingOwnership{
+		Tables: []int{
+			configuration.Network.ExitRouteTable,
+			configuration.Network.LocalEgressRouteTable,
+		},
+		RulePriorities: []int{
+			configuration.Network.ExitRulePriority,
+			configuration.Network.LocalEgressRulePriority,
+		},
+	})
+	if err != nil {
+		t.Fatalf("read fail-closed recovery routing: %v", err)
+	}
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		defaultPrefix := domain.DefaultPrefix(family)
+		var localActive, localBlackhole, exitBlackhole bool
+		for _, route := range state.Routes {
+			if route.Family != family || route.Prefix != defaultPrefix {
+				continue
+			}
+			switch {
+			case route.Table == configuration.Network.LocalEgressRouteTable && route.Disposition == domain.RouteUnicast:
+				localActive = route.Link.Valid() && route.Link.Name == "runtime-proxy"
+			case route.Table == configuration.Network.LocalEgressRouteTable && route.Disposition == domain.RouteBlackhole:
+				localBlackhole = true
+			case route.Table == configuration.Network.ExitRouteTable && route.Disposition == domain.RouteBlackhole:
+				exitBlackhole = true
+			case route.Table == configuration.Network.ExitRouteTable && route.Disposition == domain.RouteUnicast:
+				t.Fatalf("family %d Exit default remained active during bootstrap isolation: %#v", family, route)
+			}
+		}
+		if !localActive || !localBlackhole || !exitBlackhole {
+			t.Fatalf("family %d recovery routing is incomplete: %#v", family, state)
+		}
+	}
+}
+
 func integrationConfiguration(advertisedPrefix netip.Prefix) domain.Configuration {
 	configuration := domain.DefaultConfiguration()
 	configuration.Network.ProxyTunnelAddresses = []netip.Prefix{
@@ -166,6 +227,8 @@ func integrationConfiguration(advertisedPrefix netip.Prefix) domain.Configuratio
 	configuration.PacketFilter.LocalEgressIPv6Set = "runtime_local_ipv6"
 	configuration.PacketFilter.NATTable = integrationNATTable
 	configuration.PacketFilter.DNSMasqueradeChain = "runtime_dns_snat"
+	configuration.PacketFilter.LocalEgress.Enabled = true
+	configuration.PacketFilter.LocalEgress.Domains = []string{"control.example.com"}
 	configuration.Tailnet.AdvertiseRoutes = []netip.Prefix{advertisedPrefix}
 	configuration.Tailnet.AdvertiseExitNode = true
 	configuration.InternetCapability.IPv4ProbeURL = "https://ipv4.probe.example.com/status"
@@ -199,22 +262,24 @@ func (staticInternetCapability) Observe(_ context.Context, proxyLink domain.Link
 
 type staticDNSResolver struct {
 	nameServers []netip.Addr
+	resolved    []netip.Addr
 }
 
 func (resolver *staticDNSResolver) Snapshot(context.Context) (port.DNSResolverSnapshot, error) {
-	return staticDNSSnapshot{nameServers: slices.Clone(resolver.nameServers)}, nil
+	return staticDNSSnapshot{nameServers: slices.Clone(resolver.nameServers), resolved: slices.Clone(resolver.resolved)}, nil
 }
 
 type staticDNSSnapshot struct {
 	nameServers []netip.Addr
+	resolved    []netip.Addr
 }
 
 func (snapshot staticDNSSnapshot) NameServers() []netip.Addr {
 	return slices.Clone(snapshot.nameServers)
 }
 
-func (staticDNSSnapshot) Resolve(context.Context, string) ([]netip.Addr, error) {
-	return nil, errors.New("local-egress DNS resolution is disabled in this integration test")
+func (snapshot staticDNSSnapshot) Resolve(context.Context, string) ([]netip.Addr, error) {
+	return slices.Clone(snapshot.resolved), nil
 }
 
 type staticTailnetControl struct {

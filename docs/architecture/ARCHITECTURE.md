@@ -167,17 +167,26 @@ Startup order:
 13. Publish and read back the exact Tailnet preferences.
 14. Mark readiness true only if no newer event exists.
 
-Failure closure is deliberately redundant:
+The first full LocalAPI observation can race tailscaled's initial Self/netmap.
+A live failure pass therefore preserves the prepared local-control path only
+after independently repeating its kernel, resolver-freshness, proxy-TUN,
+packet-filter, routing-readback, and final kernel checks. This is a recovery
+lane for the supervised control process, not an Exit or forwarding path.
+
+Live failure closure is deliberately redundant:
 
 1. close the nftables forwarding gate;
-2. converge policy routing to blackhole-backed selectors;
-3. clear Tailnet advertisements;
-4. keep readiness false and retry with bounded exponential backoff.
+2. converge every Exit selector to blackhole-backed routing;
+3. retain table 101 active only when the complete local-control recovery path
+   is freshly revalidated, otherwise converge it to blackholes too;
+4. clear Tailnet advertisements;
+5. keep readiness false and retry with bounded exponential backoff.
 
 Normal supervised shutdown first stops scheduling and waits for the active
-reconciliation, then executes the same fail-closed sequence, then terminates
-the containerboot process group. Coordination ownership is retained until that
-cleanup completes.
+reconciliation, then executes strict fail-closed cleanup that blackholes both
+managed policy tables, then terminates the containerboot process group.
+Coordination ownership is retained until that cleanup completes. Ownership
+loss uses the same strict path; it never retains the live recovery lane.
 
 Startup preparation and every reconciliation have the same configured global
 deadline. A timeout is a failed pass: readiness remains false and the Runner

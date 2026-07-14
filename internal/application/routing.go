@@ -32,8 +32,8 @@ func buildSafetyRouting(configuration domain.Configuration) domain.RoutingState 
 	return state
 }
 
-func buildFailClosedRouting(configuration domain.Configuration, tailnetLink domain.LinkIdentity) domain.RoutingState {
-	state := buildSafetyRouting(configuration)
+func buildFailClosedRouting(configuration domain.Configuration, tailnetLink, proxyTunnelLink domain.LinkIdentity) domain.RoutingState {
+	state := buildPreparedRouting(configuration, proxyTunnelLink)
 	if !tailnetLink.Valid() {
 		return state
 	}

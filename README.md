@@ -101,9 +101,11 @@ extra arguments are rejected, so containerboot cannot share the Agent's
 - Any detected drift is handled as one ordered transaction: close forwarding,
   clear advertisements, converge and verify routing, converge and verify
   nftables, reopen forwarding, verify again, then republish advertisements.
-- Any uncertain route, link, DNS path, or ownership conflict closes the
-  forwarding gate, directs selected policy traffic into blackhole tables, and
-  clears advertisements.
+- A live technical failure always closes forwarding, blackholes Exit selectors,
+  and clears advertisements. It retains the bounded local-control path only
+  after revalidating DNS freshness, the proxy TUN, packet marking, routing
+  readback, and kernel prerequisites; otherwise table 101 is blackholed too.
+- Shutdown and coordination loss always blackhole both managed policy tables.
 
 `/livez` reports process health. `/readyz` is successful only after the latest
 complete reconciliation and becomes false immediately when a newer network

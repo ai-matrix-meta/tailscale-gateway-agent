@@ -446,6 +446,142 @@ func TestControllerPrepareRejectsInvalidProxyTunnelIdentity(t *testing.T) {
 	}
 }
 
+func TestControllerLiveFailClosedRetainsVerifiedLocalControlEgressDuringTailnetBootstrap(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if err := fixture.controller.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.recorder.reset()
+	fixture.tailnet.mutex.Lock()
+	fixture.tailnet.state.Control.InNetworkMap = false
+	fixture.tailnet.mutex.Unlock()
+
+	if _, err := fixture.controller.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
+		t.Fatalf("unavailable bootstrap state was accepted: %v", err)
+	}
+	report, err := fixture.controller.FailClosed(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
+		t.Fatalf("live fail-closed state did not report unavailable Tailnet control: %v", err)
+	}
+	if report.Changed || len(fixture.recorder.snapshot()) != 0 {
+		t.Fatalf("verified startup recovery path was rewritten: report=%#v operations=%v", report, fixture.recorder.snapshot())
+	}
+
+	state := fixture.routing.currentState()
+	proxyLink := fixture.discovery.snapshot.ProxyTunnelLink
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		active := requireRoute(t, state, family, fixture.configuration.Network.LocalEgressRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
+		if active.Link != proxyLink {
+			t.Fatalf("family %d local recovery route uses %#v, want %#v", family, active.Link, proxyLink)
+		}
+		requireRoute(t, state, family, fixture.configuration.Network.LocalEgressRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+		requireRoute(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+	}
+	policy := fixture.packetFilter.lastPolicy()
+	if !policy.GateClosed || !policy.LocalEgress.Enabled || len(policy.LocalEgress.IPv4) == 0 || len(policy.LocalEgress.IPv6) == 0 {
+		t.Fatalf("live fail-closed policy lost bounded local-control marking: %#v", policy)
+	}
+
+	fixture.tailnet.mutex.Lock()
+	fixture.tailnet.state.Control.InNetworkMap = true
+	fixture.tailnet.state.Control.ObservedAt = time.Now()
+	fixture.tailnet.mutex.Unlock()
+	if recovered, err := fixture.controller.Reconcile(context.Background()); err != nil || len(recovered.Conditions) != 0 {
+		t.Fatalf("Tailnet bootstrap did not recover through the retained control path: report=%#v err=%v", recovered, err)
+	}
+}
+
+func TestControllerLiveFailClosedBlackholesUnverifiedLocalControlEgress(t *testing.T) {
+	tests := []struct {
+		name              string
+		breakRecoveryPath func(*controllerFixture)
+	}{
+		{name: "kernel", breakRecoveryPath: func(fixture *controllerFixture) {
+			fixture.kernel.err = errors.New("kernel prerequisites unavailable")
+		}},
+		{name: "resolver", breakRecoveryPath: func(fixture *controllerFixture) {
+			fixture.resolver.err = errors.New("resolver snapshot unavailable")
+		}},
+		{name: "proxy tunnel", breakRecoveryPath: func(fixture *controllerFixture) {
+			fixture.discovery.err = errors.New("proxy tunnel is ambiguous")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newControllerFixture(t)
+			if err := fixture.controller.Prepare(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			test.breakRecoveryPath(fixture)
+
+			report, err := fixture.controller.FailClosed(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "verify local control-plane recovery path") {
+				t.Fatalf("unverified recovery path was not reported: %v", err)
+			}
+			if report.RoutingWrites == 0 {
+				t.Fatalf("unverified recovery path did not converge to strict routing: %#v", report)
+			}
+			state := fixture.routing.currentState()
+			for _, route := range state.Routes {
+				if route.Table == fixture.configuration.Network.LocalEgressRouteTable && route.Disposition == domain.RouteUnicast {
+					t.Fatalf("unverified local recovery route remained active: %#v", route)
+				}
+			}
+			for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+				requireRoute(t, state, family, fixture.configuration.Network.LocalEgressRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+			}
+		})
+	}
+}
+
+func TestControllerLiveFailClosedRestoresStrictRoutingAfterFinalKernelFailure(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if err := fixture.controller.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.kernel.failOnCheck(2, errors.New("kernel prerequisites drifted after recovery convergence"))
+
+	report, err := fixture.controller.FailClosed(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "reverify kernel prerequisites for local control-plane recovery") {
+		t.Fatalf("final recovery-path failure was not reported: %v", err)
+	}
+	if report.RoutingWrites == 0 {
+		t.Fatalf("final recovery-path failure did not restore strict routing: %#v", report)
+	}
+	state := fixture.routing.currentState()
+	for _, route := range state.Routes {
+		if route.Table == fixture.configuration.Network.LocalEgressRouteTable && route.Disposition == domain.RouteUnicast {
+			t.Fatalf("late recovery-path failure left local egress active: %#v", route)
+		}
+	}
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		requireRoute(t, state, family, fixture.configuration.Network.LocalEgressRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+		requireRoute(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+	}
+}
+
+func TestControllerShutdownAlwaysBlackholesLocalControlEgress(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if err := fixture.controller.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.kernel.err = errors.New("kernel recovery check must not run during shutdown")
+	fixture.resolver.err = errors.New("resolver recovery check must not run during shutdown")
+	fixture.discovery.err = errors.New("proxy recovery check must not run during shutdown")
+	if err := fixture.controller.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := fixture.routing.currentState()
+	for _, route := range state.Routes {
+		if route.Table == fixture.configuration.Network.LocalEgressRouteTable && route.Disposition == domain.RouteUnicast {
+			t.Fatalf("shutdown retained local recovery route: %#v", route)
+		}
+	}
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		requireRoute(t, state, family, fixture.configuration.Network.LocalEgressRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+	}
+}
+
 func TestControllerDiscoveryFailureClosesGateBeforeClearingAdvertisements(t *testing.T) {
 	fixture := newControllerFixture(t)
 	if err := fixture.controller.Prepare(context.Background()); err != nil {
@@ -459,8 +595,8 @@ func TestControllerDiscoveryFailureClosesGateBeforeClearingAdvertisements(t *tes
 	if _, err := fixture.controller.Reconcile(context.Background()); err == nil {
 		t.Fatal("discovery failure was accepted")
 	}
-	if _, err := fixture.controller.FailClosed(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, err := fixture.controller.FailClosed(context.Background()); err == nil || !strings.Contains(err.Error(), "verify local control-plane recovery path") {
+		t.Fatalf("unverified recovery path was not reported: %v", err)
 	}
 	if got := fixture.recorder.snapshot(); !slices.Equal(got, []string{"nftables-closed", "routing", "advertisements-cleared"}) {
 		t.Fatalf("unexpected fail-closed order: %v", got)
@@ -469,7 +605,7 @@ func TestControllerDiscoveryFailureClosesGateBeforeClearingAdvertisements(t *tes
 
 func TestFailClosedRoutingKeepsSelectorsBoundToBlackholeTables(t *testing.T) {
 	configuration := applicationTestConfiguration()
-	state := buildFailClosedRouting(configuration, applicationTestSnapshot().TailnetLink)
+	state := buildFailClosedRouting(configuration, applicationTestSnapshot().TailnetLink, domain.LinkIdentity{})
 	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
 		exitRule := requireRule(t, state, family, configuration.Network.ExitRulePriority)
 		if exitRule.IncomingInterface == "" || exitRule.Table != configuration.Network.ExitRouteTable {
@@ -480,6 +616,20 @@ func TestFailClosedRoutingKeepsSelectorsBoundToBlackholeTables(t *testing.T) {
 			t.Fatalf("family %d marked traffic escaped fail-closed table: %#v", family, localRule)
 		}
 		requireRoute(t, state, family, configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+		requireRoute(t, state, family, configuration.Network.LocalEgressRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+	}
+}
+
+func TestRecoverableFailClosedRoutingKeepsExitClosedAndLocalControlOnVerifiedProxy(t *testing.T) {
+	configuration := applicationTestConfiguration()
+	snapshot := applicationTestSnapshot()
+	state := buildFailClosedRouting(configuration, snapshot.TailnetLink, snapshot.ProxyTunnelLink)
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		requireRoute(t, state, family, configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+		local := requireRoute(t, state, family, configuration.Network.LocalEgressRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
+		if local.Link != snapshot.ProxyTunnelLink {
+			t.Fatalf("family %d recovery route uses %#v, want %#v", family, local.Link, snapshot.ProxyTunnelLink)
+		}
 		requireRoute(t, state, family, configuration.Network.LocalEgressRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
 	}
 }
@@ -710,16 +860,29 @@ type fakeDiscovery struct {
 }
 
 type fakeKernelPrerequisites struct {
-	mutex sync.Mutex
-	err   error
-	calls int
+	mutex      sync.Mutex
+	err        error
+	calls      int
+	failAtCall int
+	failErr    error
 }
 
 func (checker *fakeKernelPrerequisites) Check(context.Context) error {
 	checker.mutex.Lock()
 	defer checker.mutex.Unlock()
 	checker.calls++
+	if checker.calls == checker.failAtCall {
+		return checker.failErr
+	}
 	return checker.err
+}
+
+func (checker *fakeKernelPrerequisites) failOnCheck(call int, err error) {
+	checker.mutex.Lock()
+	defer checker.mutex.Unlock()
+	checker.calls = 0
+	checker.failAtCall = call
+	checker.failErr = err
 }
 
 func (discovery *fakeDiscovery) Discover(ctx context.Context, _ domain.DiscoveryRequest) (domain.NetworkSnapshot, error) {

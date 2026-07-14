@@ -293,6 +293,10 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 }
 
 func (controller *Controller) FailClosed(ctx context.Context) (domain.ReconcileReport, error) {
+	return controller.failClosed(ctx, true)
+}
+
+func (controller *Controller) failClosed(ctx context.Context, retainLocalControlEgress bool) (domain.ReconcileReport, error) {
 	report := domain.ReconcileReport{}
 	policy := controller.safetyPacketFilterPolicy()
 	if controller.hasPacketPolicy {
@@ -314,12 +318,50 @@ func (controller *Controller) FailClosed(ctx context.Context) (domain.ReconcileR
 		)
 	}
 
-	routingWrites, routingErr := controller.reconcileRouting(ctx, buildFailClosedRouting(controller.configuration, controller.lastTailnetLink))
+	strictRouting := buildFailClosedRouting(controller.configuration, controller.lastTailnetLink, domain.LinkIdentity{})
+	desiredRouting := strictRouting
+	var recoveryStateErr error
+	var recoveryPolicyErr error
+	recoveryReady := false
+	if retainLocalControlEgress && controller.configuration.PacketFilter.LocalEgress.Enabled && packetFilterErr == nil {
+		var recoveryPolicy domain.PacketFilterPolicy
+		desiredRouting, recoveryPolicy, recoveryStateErr = controller.liveFailClosedState(ctx)
+		if recoveryStateErr == nil {
+			writes, recoveryPolicyErr = controller.reconcilePacketFilter(ctx, recoveryPolicy)
+			report.PacketFilterWrites += writes
+			report.Changed = report.Changed || writes > 0
+			if recoveryPolicyErr == nil {
+				policy = recoveryPolicy
+				recoveryReady = true
+			} else {
+				desiredRouting = strictRouting
+			}
+		} else {
+			desiredRouting = strictRouting
+		}
+	}
+
+	routingWrites, routingErr := controller.reconcileRouting(ctx, desiredRouting)
 	report.RoutingWrites += routingWrites
 	report.Changed = report.Changed || routingWrites > 0
+	if routingErr == nil && recoveryReady {
+		if err := controller.verifyRouting(ctx, desiredRouting); err != nil {
+			routingErr = fmt.Errorf("verify local control-plane recovery routing: %w", err)
+		} else if err := controller.dependencies.Kernel.Check(ctx); err != nil {
+			routingErr = fmt.Errorf("reverify kernel prerequisites for local control-plane recovery: %w", err)
+		}
+	}
+	if routingErr != nil && recoveryReady {
+		fallbackWrites, fallbackErr := controller.reconcileRouting(ctx, strictRouting)
+		report.RoutingWrites += fallbackWrites
+		report.Changed = report.Changed || fallbackWrites > 0
+		routingErr = errors.Join(routingErr, wrapOptional("restore strict fail-closed routing after recovery-path failure", fallbackErr))
+	}
 	if cancellationErr := ctx.Err(); cancellationErr != nil {
 		return report, errors.Join(
 			wrapOptional("close forwarding quarantine", packetFilterErr),
+			wrapOptional("verify local control-plane recovery path", recoveryStateErr),
+			wrapOptional("refresh fail-closed local control-plane marking", recoveryPolicyErr),
 			wrapOptional("establish fail-closed routing", routingErr),
 			cancellationErr,
 		)
@@ -339,14 +381,41 @@ func (controller *Controller) FailClosed(ctx context.Context) (domain.ReconcileR
 	}
 	return report, errors.Join(
 		wrapOptional("close forwarding quarantine", packetFilterErr),
+		wrapOptional("verify local control-plane recovery path", recoveryStateErr),
+		wrapOptional("refresh fail-closed local control-plane marking", recoveryPolicyErr),
 		wrapOptional("establish fail-closed routing", routingErr),
 		wrapOptional("read Tailscale state while failing closed", readErr),
 		wrapOptional("clear Tailscale advertisements while failing closed", preferenceErr),
 	)
 }
 
+func (controller *Controller) liveFailClosedState(ctx context.Context) (domain.RoutingState, domain.PacketFilterPolicy, error) {
+	if err := controller.dependencies.Kernel.Check(ctx); err != nil {
+		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("verify kernel prerequisites: %w", err)
+	}
+	resolverSnapshot, err := controller.dependencies.Resolver.Snapshot(ctx)
+	if err != nil {
+		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("read DNS resolver snapshot: %w", err)
+	}
+	localEgressAddresses, err := controller.resolveLocalEgress(ctx, resolverSnapshot)
+	if err != nil {
+		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("resolve local control-plane destinations: %w", err)
+	}
+	proxyTunnelLink, err := controller.dependencies.ProxyTunnel.DiscoverProxyTunnel(ctx, domain.ProxyTunnelDiscoveryRequest{
+		Addresses: slices.Clone(controller.configuration.Network.ProxyTunnelAddresses),
+	})
+	if err != nil {
+		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("discover proxy tunnel: %w", err)
+	}
+	if err := proxyTunnelLink.Validate(); err != nil {
+		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("validate proxy tunnel: %w", err)
+	}
+	return buildFailClosedRouting(controller.configuration, controller.lastTailnetLink, proxyTunnelLink),
+		controller.packetFilterPolicy(domain.NetworkSnapshot{}, localEgressAddresses, true), nil
+}
+
 func (controller *Controller) Shutdown(ctx context.Context) error {
-	_, err := controller.FailClosed(ctx)
+	_, err := controller.failClosed(ctx, false)
 	return err
 }
 

@@ -55,15 +55,25 @@ unsupported kernel route.
 On any reconciliation failure, the expected state is:
 
 1. Tailnet forwarding is blocked in both directions.
-2. Owned policy selectors terminate in blackhole-backed tables.
-3. AdvertiseRoutes is empty.
-4. Readiness is false.
-5. The serialized runner retries with bounded exponential backoff while periodic
+2. Exit selectors terminate in a blackhole-backed table.
+3. Selected local-control traffic retains active table 101 defaults only when
+   the Agent has freshly revalidated resolver state, the proxy TUN, marking,
+   routing readback, and kernel prerequisites; otherwise table 101 is also
+   blackholed.
+4. AdvertiseRoutes is empty.
+5. Readiness is false.
+6. The serialized runner retries with bounded exponential backoff while periodic
    audits remain available as a lost-event backstop.
 
 If these conditions do not hold, treat the incident as a control-plane safety
 failure. Preserve logs and kernel state, stop selecting the gateway as an exit
 node, and do not manually insert objects into Agent-owned tables or priorities.
+
+During supervised startup, a transient missing Self/netmap is expected while
+containerboot authenticates. Table 101 must remain active through the verified
+proxy TUN during that interval. If it contains only blackhole defaults while
+the proxy TUN and resolver are healthy, the runtime has entered a control-plane
+bootstrap deadlock and must not be treated as an external Tailnet outage.
 
 ## Exit Capability Degradation
 
@@ -129,6 +139,9 @@ Normal termination and Kubernetes Lease loss use the same order:
 
 Do not terminate containerboot first. That ordering can leave restored or stale
 advertisements without a live owner capable of closing the data plane.
+Strict shutdown blackholes table 101 as well as the Exit table; the recoverable
+local-control lane exists only while coordination ownership and the live Runner
+are retained.
 
 ## Release Handoff
 
