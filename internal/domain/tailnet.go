@@ -12,60 +12,18 @@ type TailnetPreferences struct {
 	AdvertiseRoutes []netip.Prefix
 }
 
-type ExitDefaultRouteSet struct {
-	IPv4 bool
-	IPv6 bool
+func NewTailnetPreferences(advertisedRoutes []netip.Prefix) TailnetPreferences {
+	return NormalizeTailnetPreferences(advertisedRoutes)
 }
 
-func AllExitDefaultRoutes() ExitDefaultRouteSet {
-	return ExitDefaultRouteSet{IPv4: true, IPv6: true}
-}
-
-func (routes ExitDefaultRouteSet) Empty() bool {
-	return !routes.IPv4 && !routes.IPv6
-}
-
-func (routes ExitDefaultRouteSet) Equal(other ExitDefaultRouteSet) bool {
-	return routes.IPv4 == other.IPv4 && routes.IPv6 == other.IPv6
-}
-
-func (routes ExitDefaultRouteSet) Contains(family AddressFamily) bool {
-	switch family {
-	case IPv4:
-		return routes.IPv4
-	case IPv6:
-		return routes.IPv6
-	default:
-		return false
-	}
-}
-
-func (routes ExitDefaultRouteSet) Difference(other ExitDefaultRouteSet) ExitDefaultRouteSet {
-	return ExitDefaultRouteSet{
-		IPv4: routes.IPv4 && !other.IPv4,
-		IPv6: routes.IPv6 && !other.IPv6,
-	}
-}
-
-func (routes ExitDefaultRouteSet) Prefixes() []netip.Prefix {
-	result := make([]netip.Prefix, 0, 2)
-	if routes.IPv4 {
-		result = append(result, DefaultPrefix(IPv4))
-	}
-	if routes.IPv6 {
-		result = append(result, DefaultPrefix(IPv6))
-	}
-	return result
-}
-
-func NewTailnetPreferences(routes []netip.Prefix, exitDefaults ExitDefaultRouteSet) TailnetPreferences {
-	result := slices.Clone(routes)
-	result = append(result, exitDefaults.Prefixes()...)
+func NewTailnetExitNodePreferences(advertisedRoutes []netip.Prefix) TailnetPreferences {
+	result := slices.Clone(advertisedRoutes)
+	result = append(result, DefaultPrefix(IPv4), DefaultPrefix(IPv6))
 	return NormalizeTailnetPreferences(result)
 }
 
-func NormalizeTailnetPreferences(routes []netip.Prefix) TailnetPreferences {
-	result := slices.Clone(routes)
+func NormalizeTailnetPreferences(advertisedRoutes []netip.Prefix) TailnetPreferences {
+	result := slices.Clone(advertisedRoutes)
 	for index := range result {
 		result[index] = result[index].Masked()
 	}
@@ -91,6 +49,14 @@ func (preferences TailnetPreferences) ExitDefaultRoutes() ExitDefaultRouteSet {
 	return result
 }
 
+func (preferences TailnetPreferences) AdvertisesExitNode() bool {
+	return preferences.ExitDefaultRoutes().Equal(AllExitDefaultRoutes())
+}
+
+func (preferences TailnetPreferences) HasExitDefaultRoutes() bool {
+	return !preferences.ExitDefaultRoutes().Empty()
+}
+
 func (preferences TailnetPreferences) RoutesWithoutExitDefaults() []netip.Prefix {
 	result := make([]netip.Prefix, 0, len(preferences.AdvertiseRoutes))
 	for _, prefix := range preferences.AdvertiseRoutes {
@@ -100,11 +66,6 @@ func (preferences TailnetPreferences) RoutesWithoutExitDefaults() []netip.Prefix
 		result = append(result, prefix)
 	}
 	return result
-}
-
-func (preferences TailnetPreferences) WithoutExitDefaults(exitDefaults ExitDefaultRouteSet) TailnetPreferences {
-	retainedExitDefaults := preferences.ExitDefaultRoutes().Difference(exitDefaults)
-	return NewTailnetPreferences(preferences.RoutesWithoutExitDefaults(), retainedExitDefaults)
 }
 
 func (preferences TailnetPreferences) Equal(other TailnetPreferences) bool {

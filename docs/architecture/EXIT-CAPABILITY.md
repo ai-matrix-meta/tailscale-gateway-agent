@@ -29,10 +29,21 @@ The implementation must establish three independent observations:
 3. Fresh IPv4 and IPv6 Internet capability through the discovered proxy TUN,
    sing-box, and the configured upstream SOCKS transport.
 
-The Agent derives each Exit default independently. A family-specific default is
-advertised only when local intent, approval for that exact prefix, and fresh
-capability for that address family all allow it. Subnet advertisements and
-ordinary Tailnet IPv6 remain independent of Internet capability.
+Tailscale represents a selectable Exit Node as an indivisible pair of default
+routes. Pinned upstream Tailscale evaluates `ExitNodeOption` through
+`tsaddr.ContainsExitRoutes`, which returns true only when both `0.0.0.0/0` and
+`::/0` are present. A single default is an ordinary subnet route, not a partial
+Exit Node.
+
+The Agent therefore derives two distinct states. Tailnet advertisement intent
+contains both defaults when at least one address family has fresh capability,
+and contains neither when both families are unavailable. The Exit routing table
+independently installs an active default only for each healthy family and keeps
+the higher-metric blackhole for every unavailable family. Control-plane
+approval is observed for both defaults while the Exit Node is advertised; an
+explicit rejection degrades readiness but never causes preference-write
+oscillation. Subnet advertisements and ordinary Tailnet IPv6 remain independent
+of Internet capability.
 
 The Agent still does not handle application data-plane packets. It creates two
 small, bounded HTTPS control-plane requests. The kernel and sing-box carry
@@ -43,8 +54,9 @@ those requests over the same proxy TUN path used by Exit traffic.
 - Inferring `run` versus `supervise-containerboot` from the environment.
 - Inferring Internet capability from local addresses, DNS AAAA records, or
   internal routes.
-- Advertising an Exit default without fresh capability evidence for its address
-  family.
+- Installing an active Exit default without fresh capability evidence for its
+  address family.
+- Treating a single advertised default as a selectable Exit Node.
 - Selecting a public probe provider in source or default configuration.
 - Replacing the external Tailnet traffic matrix with an internal probe.
 - Moving Tailscale, sing-box, or Kubernetes lifecycle ownership into the
@@ -131,6 +143,30 @@ It contains no URL, HTTP response, DNS record, socket, Pod identity, producer
 identity, sequence number, file path, or third-party type. Snapshot validation
 rejects invalid links, reversed times, availability without a completed
 observation, and mismatched address families.
+
+### Exit Node Advertisement And Active Routes
+
+`ExitDefaultRouteSet` is a routing-domain value that identifies which address
+families may have active defaults in the Exit table. It is not a Tailnet
+advertisement shape. Separate constructors make non-Exit and Exit Node intent
+explicit; the Exit Node constructor always emits both defaults atomically.
+LocalAPI normalization still accepts zero, one, or two observed defaults so the
+controller can safely repair legacy, externally edited, or partially converged
+preferences.
+
+The states are intentionally not equivalent:
+
+| Fresh capability | Tailnet defaults | IPv4 active route | IPv6 active route |
+|---|---|---|---|
+| neither | neither | absent; blackhole retained | absent; blackhole retained |
+| IPv4 only | both | present | absent; blackhole retained |
+| IPv6 only | both | absent; blackhole retained | present |
+| both | both | present | present |
+
+This asymmetry is required by the Tailscale client contract. An unavailable
+family remains fail-closed even though its default is part of the atomic
+advertisement pair; readiness and bounded family-labeled conditions expose the
+degradation.
 
 ### Reconciliation Conditions
 
@@ -297,41 +333,49 @@ Every pass follows this order:
 1. Read and validate LocalAPI status and local preferences.
 2. Capture one resolver snapshot and discover the current network state.
 3. Observe Internet capability for the exact discovered proxy link.
-4. Derive local advertisement intent:
+4. Derive independent desired states:
    - configured subnet prefixes are always retained;
-   - each Exit default is included only when its family snapshot is available,
-     fresh, initialized, and bound to the same proxy link.
+   - each family receives an active Exit default only when its snapshot is
+     available, fresh, initialized, and bound to the same proxy link;
+   - both Tailnet Exit defaults are desired when at least one active family
+     exists, otherwise neither is desired.
 5. Build and plan routing and nftables state.
-6. Withdraw every no-longer-eligible Exit default before removing its active
-   route. A cross-family transition also withholds newly eligible defaults at
-   this stage.
-7. If the complete drift is limited to those Exit defaults and nftables already
-   matches, apply only the scoped route changes. Otherwise enter the normal
-   global quarantine transaction and clear all advertisements.
+6. If no active family remains, withdraw the complete Tailnet Exit Node pair
+   before deleting the final active route. A partial observed default is also
+   removed at this boundary.
+7. If complete drift is limited to active Exit defaults and nftables already
+   matches, apply a scoped route transaction: delete unavailable-family active
+   routes, then require readback to show that the exact activation plan is the
+   only remaining difference before installing any recovered-family routes.
+   Read back the final state afterward. Otherwise enter the normal global
+   quarantine transaction and clear all advertisements.
 8. Converge and read back routing, nftables, and kernel prerequisites.
-9. Publish the final desired preferences only after verification. A pure loss
-   or recovery requires one preference write; a direct cross-family transition
-   requires one withdrawal and one publication write.
+9. Publish the atomic Exit Node pair only after at least one active route and
+   the complete data plane have been verified. Migrate a legacy single-default
+   preference to the pair at this point. Single-family loss, second-family
+   recovery, and cross-family replacement perform no Tailnet write while the
+   pair remains desired.
 10. Read back preferences and current control-plane approval.
-11. Evaluate every desired subnet prefix and each desired Exit default against
-   approved routes.
+11. Evaluate every desired subnet prefix and both Exit defaults against approved
+   routes whenever the Exit Node pair is desired.
 12. Publish Ready only when no technical error, capability condition, approval
     condition, or newer event exists.
 
-Capability loss is a family-scoped preference-reduction transaction. It
-withdraws only the unavailable family defaults, preserves healthy family
-defaults and configured subnet routes, and does not disable ordinary IPv6. The
-corresponding Exit-table active route is then replaced by its fail-closed
-blackhole and the complete routing, nftables, and kernel state is read back.
-If the change is limited to Exit defaults, the global forwarding gate is not
-rewritten; any unrelated drift or technical failure enters the normal
-fail-closed transaction.
+Capability loss is a family-scoped routing transaction. While another family
+remains healthy, the Tailnet pair and configured subnet routes remain unchanged;
+the Agent deletes only the unavailable family's active route, retains its
+blackhole, and reads back the complete routing, nftables, and kernel state. When
+the final healthy family is lost, the pair is withdrawn before that active route
+is deleted. If the change is limited to active Exit defaults, the global
+forwarding gate is not rewritten; unrelated drift or technical failure enters
+the normal fail-closed transaction.
 
-Capability recovery is a family-scoped advertisement-increase transaction. The
-Agent installs and verifies only the newly eligible active default routes,
-performs final routing, nftables, and kernel readback, and then publishes the
-new defaults. An existing healthy family remains advertised throughout. No
-family default is published before its active route has converged.
+Capability recovery is also routing-scoped. The Agent installs and verifies the
+newly eligible active route. Recovery of the first healthy family publishes the
+atomic pair only after final routing, nftables, and kernel readback; recovery of
+the second family performs no preference write. A direct IPv4-to-IPv6 or
+IPv6-to-IPv4 transition deletes and verifies the old active route before
+installing the new one while preserving the already-advertised pair.
 
 Explicit Admin Console rejection is observed after local intent converges. It
 does not alter local preferences, delete configuration, or trigger another
@@ -421,10 +465,15 @@ Unit and deterministic adapter tests must cover:
 - first observation, success/failure debounce, saturation, expiration,
   cancellation, and proxy-link replacement;
 - both healthy, IPv4-only, IPv6-only, both failed, and stale snapshots;
-- capability loss withdrawing only failed-family defaults while preserving
-  healthy-family, subnet, and internal IPv6 routes;
-- family-scoped recovery verifying the data plane before publishing newly
-  eligible defaults;
+- single-family capability loss preserving the atomic Tailnet pair while
+  deleting only the failed-family active route and retaining its blackhole;
+- final-family loss withdrawing the pair before deleting the final active route;
+- first-family recovery verifying the complete data plane before publishing the
+  pair, and second-family recovery producing no preference write;
+- direct cross-family replacement deleting and reading back the old active route
+  before installing the new route;
+- migration of legacy single-default preferences to the atomic pair without
+  unrelated routing or nftables writes;
 - advertised and approved, explicitly unapproved, nil Self, missing netmap,
   offline control poll, nil AllowedIPs, HA standby, and separate Exit-default
   approval;
@@ -438,13 +487,16 @@ also prove capability loss and recovery ordering without regressing route
 event handling, zero-write convergence, or cleanup.
 
 External acceptance still requires a real Tailnet client to validate subnet,
-Exit, non-Exit, IPv4, IPv6, and DNS behavior. Source or internal probe success
-does not replace that matrix.
+Exit, non-Exit, IPv4, IPv6, and DNS behavior. It must also prove
+`ExitNodeOption=true` and confirm that AllowedIPs contains both defaults while
+either data-plane family is healthy. Source or internal probe success does not
+replace that matrix.
 
-## Unresolved Production Input
+## Production Endpoint Ownership
 
-Production endpoint values are intentionally absent. Before P0-007 can close,
-operations must approve the IPv4 and IPv6 probe configuration and record:
+The Agent has no provider default. Each deployment owns and explicitly selects
+both probe URLs outside Agent source; the adapter still resolves and dials only
+the requested family. Any deployment or endpoint change must record:
 
 - requested-family DNS behavior and rejection of mixed or reserved
   destinations;
@@ -456,5 +508,7 @@ operations must approve the IPv4 and IPv6 probe configuration and record:
 - privacy and compliance conclusion; and
 - successful execution through the real proxy path.
 
-Until then, implementation may be locally complete, but the release decision
-remains `NO-GO` and no production endpoint or digest may be fabricated.
+Endpoint selection does not close runtime acceptance by itself. P0-007 still
+requires immutable-image live readback and the external Tailnet traffic matrix
+for the actual proxy path; a failed family remains Degraded and blackholed
+without suppressing the selectable Exit Node when the other family is healthy.

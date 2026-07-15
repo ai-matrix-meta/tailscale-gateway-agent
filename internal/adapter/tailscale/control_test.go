@@ -10,6 +10,7 @@ import (
 	"github.com/ai-matrix-meta/tailscale-gateway-agent/internal/domain"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/types/views"
 )
 
@@ -82,7 +83,7 @@ func TestReadStateRejectsInvalidApprovedRoutes(t *testing.T) {
 func TestWritePreferencesMasksOnlyAdvertiseRoutes(t *testing.T) {
 	client := &fakeLocalAPI{}
 	control := &Control{client: client}
-	preferences := domain.NewTailnetPreferences([]netip.Prefix{netip.MustParsePrefix("10.0.8.0/24")}, domain.AllExitDefaultRoutes())
+	preferences := domain.NewTailnetExitNodePreferences([]netip.Prefix{netip.MustParsePrefix("10.0.8.0/24")})
 	client.editResponse = &ipn.Prefs{AdvertiseRoutes: preferences.AdvertiseRoutes}
 
 	if err := control.WritePreferences(context.Background(), preferences); err != nil {
@@ -101,9 +102,21 @@ func TestWritePreferencesMasksOnlyAdvertiseRoutes(t *testing.T) {
 
 func TestWritePreferencesRejectsNonConvergedResponse(t *testing.T) {
 	control := &Control{client: &fakeLocalAPI{editResponse: &ipn.Prefs{}}}
-	preferences := domain.NewTailnetPreferences([]netip.Prefix{netip.MustParsePrefix("10.0.8.0/24")}, domain.ExitDefaultRouteSet{})
+	preferences := domain.NewTailnetPreferences([]netip.Prefix{netip.MustParsePrefix("10.0.8.0/24")})
 	if err := control.WritePreferences(context.Background(), preferences); err == nil {
 		t.Fatal("non-converged LocalAPI response was accepted")
+	}
+}
+
+func TestDesiredPreferencesSatisfyPinnedTailscaleExitNodeRecognition(t *testing.T) {
+	preferences := domain.NewTailnetExitNodePreferences(nil)
+	if !tsaddr.ContainsExitRoutes(views.SliceOf(preferences.AdvertiseRoutes)) {
+		t.Fatalf("desired preferences are not recognized as an Exit Node by pinned Tailscale: %v", preferences.AdvertiseRoutes)
+	}
+
+	partial := domain.NormalizeTailnetPreferences([]netip.Prefix{domain.DefaultPrefix(domain.IPv4)})
+	if tsaddr.ContainsExitRoutes(views.SliceOf(partial.AdvertiseRoutes)) {
+		t.Fatalf("single-family default unexpectedly satisfies Tailscale Exit Node recognition: %v", partial.AdvertiseRoutes)
 	}
 }
 

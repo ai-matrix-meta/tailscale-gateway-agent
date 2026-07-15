@@ -395,6 +395,34 @@ type RoutingState struct {
 	Rules  []Rule
 }
 
+type ExitDefaultRouteSet struct {
+	IPv4 bool
+	IPv6 bool
+}
+
+func AllExitDefaultRoutes() ExitDefaultRouteSet {
+	return ExitDefaultRouteSet{IPv4: true, IPv6: true}
+}
+
+func (routes ExitDefaultRouteSet) Empty() bool {
+	return !routes.IPv4 && !routes.IPv6
+}
+
+func (routes ExitDefaultRouteSet) Equal(other ExitDefaultRouteSet) bool {
+	return routes.IPv4 == other.IPv4 && routes.IPv6 == other.IPv6
+}
+
+func (routes ExitDefaultRouteSet) Contains(family AddressFamily) bool {
+	switch family {
+	case IPv4:
+		return routes.IPv4
+	case IPv6:
+		return routes.IPv6
+	default:
+		return false
+	}
+}
+
 type RoutingOwnership struct {
 	Tables         []int
 	RulePriorities []int
@@ -426,6 +454,13 @@ type RoutingChanges struct {
 
 func (changes RoutingChanges) Empty() bool {
 	return len(changes.UpsertRoutes) == 0 && len(changes.DeleteRules) == 0 && len(changes.AddRules) == 0 && len(changes.DeleteRoutes) == 0
+}
+
+func (changes RoutingChanges) Equal(other RoutingChanges) bool {
+	return slices.Equal(changes.UpsertRoutes, other.UpsertRoutes) &&
+		slices.Equal(changes.DeleteRules, other.DeleteRules) &&
+		slices.Equal(changes.AddRules, other.AddRules) &&
+		slices.Equal(changes.DeleteRoutes, other.DeleteRoutes)
 }
 
 func DiffRouting(desired, observed RoutingState, ownership RoutingOwnership) (RoutingChanges, error) {

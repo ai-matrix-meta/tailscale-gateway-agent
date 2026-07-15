@@ -125,3 +125,27 @@ func TestDiffRoutingEqualStateProducesNoChanges(t *testing.T) {
 		t.Fatalf("equal routing state produced changes: %#v", changes)
 	}
 }
+
+func TestRoutingChangesEqualityIncludesEveryOperationClass(t *testing.T) {
+	route := Route{Family: IPv4, Disposition: RouteBlackhole, Table: 100, Prefix: DefaultPrefix(IPv4), Metric: 32_760}
+	rule := Rule{Family: IPv4, Priority: 99, Table: 100, IncomingInterface: "tailnet-in"}
+	baseline := RoutingChanges{
+		UpsertRoutes: []Route{route},
+		DeleteRules:  []Rule{rule},
+		AddRules:     []Rule{rule},
+		DeleteRoutes: []Route{route},
+	}
+	if !baseline.Equal(baseline) {
+		t.Fatal("identical routing changes were not equal")
+	}
+	for _, changed := range []RoutingChanges{
+		{DeleteRules: baseline.DeleteRules, AddRules: baseline.AddRules, DeleteRoutes: baseline.DeleteRoutes},
+		{UpsertRoutes: baseline.UpsertRoutes, AddRules: baseline.AddRules, DeleteRoutes: baseline.DeleteRoutes},
+		{UpsertRoutes: baseline.UpsertRoutes, DeleteRules: baseline.DeleteRules, DeleteRoutes: baseline.DeleteRoutes},
+		{UpsertRoutes: baseline.UpsertRoutes, DeleteRules: baseline.DeleteRules, AddRules: baseline.AddRules},
+	} {
+		if baseline.Equal(changed) {
+			t.Fatalf("routing changes ignored an operation class: baseline=%#v changed=%#v", baseline, changed)
+		}
+	}
+}

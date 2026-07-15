@@ -36,7 +36,7 @@ const (
 	integrationNATTable                = "ts_gateway_runtime_nat"
 )
 
-func TestRunnerConvergesWithoutSelfEventsAndRepairsExternalDrift(t *testing.T) {
+func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *testing.T) {
 	if err := purgeManagedRouting(); err != nil {
 		t.Fatalf("remove stale managed routing: %v", err)
 	}
@@ -85,17 +85,18 @@ func TestRunnerConvergesWithoutSelfEventsAndRepairsExternalDrift(t *testing.T) {
 	tailnet := &staticTailnetControl{state: domain.TailnetState{
 		Running: true, KernelTunnel: true,
 		SelfAddresses: []netip.Addr{netip.MustParseAddr("100.64.0.8"), netip.MustParseAddr("fd7a:115c:a1e0::8")},
-		Preferences:   domain.NewTailnetPreferences(nil, domain.ExitDefaultRouteSet{}),
+		Preferences:   domain.NewTailnetPreferences(nil),
 		Control: domain.TailnetControlObservation{
 			SelfPresent: true, InNetworkMap: true, Online: true, AllowedIPsAvailable: true,
-			ApprovedRoutes: domain.NewTailnetPreferences(configuration.Tailnet.AdvertiseRoutes, domain.AllExitDefaultRoutes()).AdvertiseRoutes,
+			ApprovedRoutes: domain.NewTailnetExitNodePreferences(configuration.Tailnet.AdvertiseRoutes).AdvertiseRoutes,
 			ObservedAt:     time.Now(),
 		},
 	}}
+	internetCapability := &mutableInternetCapability{activeExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv4: true}}
 	controller, err := application.NewController(configuration, application.ControllerDependencies{
 		Kernel: staticKernelChecker{}, ProxyTunnel: network, Network: network, Routing: network,
 		PacketFilter: nftablesadapter.New(), Resolver: resolver, Tailnet: tailnet,
-		InternetCapability: staticInternetCapability{},
+		InternetCapability: internetCapability,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -145,25 +146,57 @@ func TestRunnerConvergesWithoutSelfEventsAndRepairsExternalDrift(t *testing.T) {
 	if startup.report.RoutingWrites == 0 || startup.report.PacketFilterWrites == 0 || startup.report.TailnetWrites == 0 {
 		t.Fatalf("startup reconciliation omitted a managed resource: %#v", startup.report)
 	}
+	if !slices.Contains(startup.report.Conditions, domain.ReconcileCondition{Kind: domain.ConditionInternetCapabilityUnavailable, Family: domain.IPv6}) {
+		t.Fatalf("IPv4-only startup omitted the IPv6 capability condition: %#v", startup.report)
+	}
+	assertAtomicExitNodePreferences(t, tailnet, configuration)
+	assertManagedExitDefaultRouting(t, network, configuration, domain.ExitDefaultRouteSet{IPv4: true})
 	time.Sleep(2 * configuration.Runtime.EventDebounce)
 	if records := metrics.snapshot(); len(records) != 1 {
 		t.Fatalf("managed writes leaked self-generated network events: %#v", records)
+	}
+
+	internetCapability.setActiveExitDefaultRoutes(domain.ExitDefaultRouteSet{IPv6: true})
+	addDummy(t, "runtime-cap-v6", nil)
+	transitionRecords := metrics.waitForRecord(t, 2, 15*time.Second)
+	transition := transitionRecords[1]
+	if transition.err != nil || transition.report.RoutingWrites == 0 || transition.report.PacketFilterWrites != 0 || transition.report.TailnetWrites != 0 {
+		t.Fatalf("IPv4-to-IPv6 capability transition was not routing-scoped: %#v", transition)
+	}
+	if !slices.Contains(transition.report.Conditions, domain.ReconcileCondition{Kind: domain.ConditionInternetCapabilityUnavailable, Family: domain.IPv4}) {
+		t.Fatalf("IPv6-only transition omitted the IPv4 capability condition: %#v", transition.report)
+	}
+	assertAtomicExitNodePreferences(t, tailnet, configuration)
+	assertManagedExitDefaultRouting(t, network, configuration, domain.ExitDefaultRouteSet{IPv6: true})
+
+	internetCapability.setActiveExitDefaultRoutes(domain.AllExitDefaultRoutes())
+	addDummy(t, "runtime-cap-all", nil)
+	recoveryRecords := metrics.waitForRecord(t, 3, 15*time.Second)
+	recovery := recoveryRecords[2]
+	if recovery.err != nil || recovery.report.RoutingWrites == 0 || recovery.report.PacketFilterWrites != 0 || recovery.report.TailnetWrites != 0 || len(recovery.report.Conditions) != 0 {
+		t.Fatalf("dual-family capability recovery was not routing-scoped: %#v", recovery)
+	}
+	assertAtomicExitNodePreferences(t, tailnet, configuration)
+	assertManagedExitDefaultRouting(t, network, configuration, domain.AllExitDefaultRoutes())
+	time.Sleep(2 * configuration.Runtime.EventDebounce)
+	if records := metrics.snapshot(); len(records) != 3 {
+		t.Fatalf("capability route writes leaked self-generated network events: %#v", records)
 	}
 
 	deleted := findManagedIPv4Default(t)
 	if err := vnetlink.RouteDel(&deleted); err != nil {
 		t.Fatalf("delete managed route externally: %v", err)
 	}
-	repairRecords := metrics.waitForRecord(t, 2, 15*time.Second)
-	repair := repairRecords[1]
+	repairRecords := metrics.waitForRecord(t, 4, 15*time.Second)
+	repair := repairRecords[3]
 	if repair.err != nil || repair.report.RoutingWrites == 0 {
 		t.Fatalf("external route deletion was not repaired: %#v", repair)
 	}
 	_ = findManagedIPv4Default(t)
 
 	addDummy(t, "runtime-noise", nil)
-	steadyRecords := metrics.waitForRecord(t, 3, 15*time.Second)
-	steady := steadyRecords[2]
+	steadyRecords := metrics.waitForRecord(t, 5, 15*time.Second)
+	steady := steadyRecords[4]
 	if steady.err != nil || steady.report.Changed || steady.report.RoutingWrites != 0 || steady.report.PacketFilterWrites != 0 || steady.report.TailnetWrites != 0 {
 		t.Fatalf("no-drift event reconciliation performed writes: %#v", steady)
 	}
@@ -205,6 +238,55 @@ func assertLocalControlRecoveryRouting(t *testing.T, store port.RoutingStore, co
 		if !localActive || !localBlackhole || !exitBlackhole {
 			t.Fatalf("family %d recovery routing is incomplete: %#v", family, state)
 		}
+	}
+}
+
+func assertManagedExitDefaultRouting(t *testing.T, store port.RoutingStore, configuration domain.Configuration, activeRoutes domain.ExitDefaultRouteSet) {
+	t.Helper()
+	state, err := store.ReadRouting(context.Background(), domain.RoutingOwnership{
+		Tables:         []int{configuration.Network.ExitRouteTable, configuration.Network.LocalEgressRouteTable},
+		RulePriorities: []int{configuration.Network.ExitRulePriority, configuration.Network.LocalEgressRulePriority},
+	})
+	if err != nil {
+		t.Fatalf("read managed Exit routing: %v", err)
+	}
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		activeRouteCount := 0
+		blackholeRouteCount := 0
+		for _, route := range state.Routes {
+			if route.Family != family || route.Table != configuration.Network.ExitRouteTable || route.Prefix != domain.DefaultPrefix(family) {
+				continue
+			}
+			switch route.Disposition {
+			case domain.RouteUnicast:
+				activeRouteCount++
+				if route.Link.Name != "runtime-proxy" || route.Metric != configuration.Network.ActiveRouteMetric {
+					t.Fatalf("family %d has an invalid active Exit default: %#v", family, route)
+				}
+			case domain.RouteBlackhole:
+				blackholeRouteCount++
+				if route.Metric != configuration.Network.FailClosedRouteMetric {
+					t.Fatalf("family %d has an invalid Exit blackhole: %#v", family, route)
+				}
+			default:
+				t.Fatalf("family %d has an unexpected Exit default disposition: %#v", family, route)
+			}
+		}
+		expectedActiveRouteCount := 0
+		if activeRoutes.Contains(family) {
+			expectedActiveRouteCount = 1
+		}
+		if activeRouteCount != expectedActiveRouteCount || blackholeRouteCount != 1 {
+			t.Fatalf("family %d Exit routing does not match active set %#v: %#v", family, activeRoutes, state.Routes)
+		}
+	}
+}
+
+func assertAtomicExitNodePreferences(t *testing.T, control *staticTailnetControl, configuration domain.Configuration) {
+	t.Helper()
+	want := domain.NewTailnetExitNodePreferences(configuration.Tailnet.AdvertiseRoutes)
+	if got := control.preferences(); !got.Equal(want) || !got.AdvertisesExitNode() {
+		t.Fatalf("Tailnet preferences are not the exact atomic Exit Node target: got %v, want %v", got.AdvertiseRoutes, want.AdvertiseRoutes)
 	}
 }
 
@@ -250,14 +332,34 @@ type staticKernelChecker struct{}
 
 func (staticKernelChecker) Check(context.Context) error { return nil }
 
-type staticInternetCapability struct{}
+type mutableInternetCapability struct {
+	mutex                   sync.Mutex
+	activeExitDefaultRoutes domain.ExitDefaultRouteSet
+}
 
-func (staticInternetCapability) Observe(_ context.Context, proxyLink domain.LinkIdentity) (domain.InternetCapabilitySnapshot, error) {
+func (capability *mutableInternetCapability) Observe(_ context.Context, proxyLink domain.LinkIdentity) (domain.InternetCapabilitySnapshot, error) {
+	capability.mutex.Lock()
+	activeExitDefaultRoutes := capability.activeExitDefaultRoutes
+	capability.mutex.Unlock()
 	now := time.Now()
 	fresh := domain.InternetFamilyCapability{
 		Initialized: true, Available: true, ObservedAt: now, ValidUntil: now.Add(time.Minute),
 	}
-	return domain.InternetCapabilitySnapshot{ProxyLink: proxyLink, IPv4: fresh, IPv6: fresh}, nil
+	unavailable := domain.InternetFamilyCapability{Initialized: true, ObservedAt: now}
+	snapshot := domain.InternetCapabilitySnapshot{ProxyLink: proxyLink, IPv4: unavailable, IPv6: unavailable}
+	if activeExitDefaultRoutes.IPv4 {
+		snapshot.IPv4 = fresh
+	}
+	if activeExitDefaultRoutes.IPv6 {
+		snapshot.IPv6 = fresh
+	}
+	return snapshot, nil
+}
+
+func (capability *mutableInternetCapability) setActiveExitDefaultRoutes(routes domain.ExitDefaultRouteSet) {
+	capability.mutex.Lock()
+	defer capability.mutex.Unlock()
+	capability.activeExitDefaultRoutes = routes
 }
 
 type staticDNSResolver struct {
@@ -303,6 +405,12 @@ func (control *staticTailnetControl) WritePreferences(_ context.Context, prefere
 	defer control.mutex.Unlock()
 	control.state.Preferences = domain.NormalizeTailnetPreferences(preferences.AdvertiseRoutes)
 	return nil
+}
+
+func (control *staticTailnetControl) preferences() domain.TailnetPreferences {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return domain.TailnetPreferences{AdvertiseRoutes: slices.Clone(control.state.Preferences.AdvertiseRoutes)}
 }
 
 func (*staticTailnetControl) Subscribe(ctx context.Context) (<-chan domain.TailnetEvent, <-chan error, error) {

@@ -58,11 +58,11 @@ func buildPreparedRouting(configuration domain.Configuration, proxyTunnelLink do
 	return state
 }
 
-func buildDesiredRouting(configuration domain.Configuration, snapshot domain.NetworkSnapshot, activeExitDefaults domain.ExitDefaultRouteSet) domain.RoutingState {
+func buildDesiredRouting(configuration domain.Configuration, snapshot domain.NetworkSnapshot, activeExitDefaultRoutes domain.ExitDefaultRouteSet) domain.RoutingState {
 	network := configuration.Network
 	state := buildPreparedRouting(configuration, snapshot.ProxyTunnelLink)
 	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
-		if activeExitDefaults.Contains(family) {
+		if activeExitDefaultRoutes.Contains(family) {
 			state.Routes = append(state.Routes,
 				activeRoute(network, family, network.ExitRouteTable, domain.DefaultPrefix(family), netip.Addr{}, snapshot.ProxyTunnelLink, false),
 			)
@@ -117,4 +117,58 @@ func activeRoute(network domain.NetworkConfiguration, family domain.AddressFamil
 		Family: family, Disposition: domain.RouteUnicast, Table: table, Prefix: prefix,
 		Gateway: gateway, Link: link, OnLink: onLink, Metric: network.ActiveRouteMetric,
 	}
+}
+
+type exitDefaultRouteTransition struct {
+	routesToActivate    domain.ExitDefaultRouteSet
+	routesToDeactivate  domain.ExitDefaultRouteSet
+	activationChanges   domain.RoutingChanges
+	deactivationChanges domain.RoutingChanges
+}
+
+func classifyExitDefaultRouteTransition(changes domain.RoutingChanges, network domain.NetworkConfiguration) (exitDefaultRouteTransition, bool) {
+	if changes.Empty() || len(changes.AddRules) != 0 || len(changes.DeleteRules) != 0 {
+		return exitDefaultRouteTransition{}, false
+	}
+	transition := exitDefaultRouteTransition{}
+	for _, route := range changes.UpsertRoutes {
+		if !isActiveExitDefaultRoute(route, network) ||
+			!addExitDefaultRoute(&transition.routesToActivate, route.Family) {
+			return exitDefaultRouteTransition{}, false
+		}
+		transition.activationChanges.UpsertRoutes = append(transition.activationChanges.UpsertRoutes, route)
+	}
+	for _, route := range changes.DeleteRoutes {
+		if !isActiveExitDefaultRoute(route, network) || transition.routesToActivate.Contains(route.Family) ||
+			!addExitDefaultRoute(&transition.routesToDeactivate, route.Family) {
+			return exitDefaultRouteTransition{}, false
+		}
+		transition.deactivationChanges.DeleteRoutes = append(transition.deactivationChanges.DeleteRoutes, route)
+	}
+	return transition, true
+}
+
+func isActiveExitDefaultRoute(route domain.Route, network domain.NetworkConfiguration) bool {
+	if route.Family != domain.IPv4 && route.Family != domain.IPv6 {
+		return false
+	}
+	return route.Table == network.ExitRouteTable &&
+		route.Disposition == domain.RouteUnicast &&
+		route.Metric == network.ActiveRouteMetric &&
+		route.Prefix == domain.DefaultPrefix(route.Family)
+}
+
+func addExitDefaultRoute(routes *domain.ExitDefaultRouteSet, family domain.AddressFamily) bool {
+	if routes.Contains(family) {
+		return false
+	}
+	switch family {
+	case domain.IPv4:
+		routes.IPv4 = true
+	case domain.IPv6:
+		routes.IPv6 = true
+	default:
+		return false
+	}
+	return true
 }

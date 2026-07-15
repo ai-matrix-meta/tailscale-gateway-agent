@@ -104,11 +104,14 @@ Agent route protocol. A foreign object inside an owned identity is a conflict,
 not an invitation to delete it. Routes are installed before rules are enabled;
 rules are removed before obsolete routes.
 
-Each Exit default additionally requires fresh Internet capability for its own
-address family through the discovered proxy TUN and control-plane approval of
-that default route. Capability monitoring runs inside the existing Agent
-process; its detailed ownership, security, and transaction contracts are
-defined in
+Each active Exit default additionally requires fresh Internet capability for
+its own address family through the discovered proxy TUN. Tailscale clients
+recognize an Exit Node only when both defaults are advertised, so the Tailnet
+preference pair is published atomically whenever at least one family is active;
+an unavailable family retains only its blackhole fallback. Approval observation
+covers both defaults and degrades readiness without rewriting unchanged
+preferences. Capability monitoring runs inside the existing Agent process; its
+detailed ownership, security, and transaction contracts are defined in
 [Exit capability and route approval](EXIT-CAPABILITY.md).
 
 ## Packet Filter

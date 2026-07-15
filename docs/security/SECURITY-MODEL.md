@@ -22,6 +22,10 @@ adapter calls.
 - Live failures close forwarding, blackhole Exit selectors, and clear
   advertisements. The local-control recovery lane remains active only after
   fresh resolver, proxy-TUN, marking, routing-readback, and kernel validation.
+- Tailscale's Exit Node advertisement is an atomic dual-default pair. If only
+  one family is healthy, the other advertised family has no active route and
+  terminates at the managed blackhole; readiness remains Degraded until its
+  independently probed path recovers.
 - Lost coordination and shutdown always blackhole both managed policy tables;
   they never retain the live recovery lane.
 - No-drift reconciliation invokes no writer.

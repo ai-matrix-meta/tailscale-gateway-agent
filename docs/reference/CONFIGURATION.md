@@ -106,8 +106,11 @@ cluster-owned production decisions. Their static URL, timing, and threshold
 contracts and their runtime DNS/TLS/HTTP requirements are defined in
 [Exit capability and route approval](../architecture/EXIT-CAPABILITY.md).
 The two fields may use the same dual-stack URL; each probe resolves and dials
-only its requested address family, and a failed family does not block the
-healthy family from receiving its Exit default.
+only its requested address family. A failed family does not block the healthy
+family from activating its Exit route. Tailnet advertisement remains an atomic
+pair of IPv4 and IPv6 defaults because that is the Tailscale Exit Node
+recognition contract; unavailable-family traffic terminates at the managed
+blackhole.
 
 ## Reconciliation Runtime
 

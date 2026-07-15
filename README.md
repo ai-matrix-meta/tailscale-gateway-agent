@@ -22,9 +22,11 @@ Selected local control traffic -> packet mark -> local-egress policy table
 Clients that do not select this node as an exit node retain normal Tailnet and
 advertised-subnet behavior. The Agent publishes subnet advertisements only
 after routing and packet-filter state has converged and has been read back
-successfully. Each Exit default additionally requires fresh Internet
-capability for its own address family through the discovered proxy TUN; an
-unhealthy family does not suppress a healthy family's Exit default.
+successfully. Each active Exit route additionally requires fresh Internet
+capability for its own address family through the discovered proxy TUN.
+Tailscale recognizes an Exit Node only when both defaults are advertised, so
+the Agent publishes that pair whenever at least one family is active and keeps
+the unavailable family fail-closed behind its blackhole.
 
 ## Runtime Requirements
 
@@ -99,10 +101,12 @@ extra arguments are rejected, so containerboot cannot share the Agent's
   from escaping the configured proxy path.
 - The Agent owns only the low 16 packet-mark bits. Marking preserves Tailscale's
   upper mark bytes, and policy rules match the same low-bit mask.
-- A capability transition limited to Exit defaults is handled per address
-  family: withdraw unavailable defaults, converge only their routing changes,
-  verify the complete data plane, then publish newly eligible defaults. The
-  healthy family and global forwarding gate remain unchanged.
+- A capability transition limited to active Exit routes is handled per address
+  family. Deactivations are deleted and read back before activations are
+  installed; recovery of the first healthy family publishes the atomic
+  dual-default Tailnet pair only after complete data-plane verification. The
+  pair remains unchanged across single-family loss, second-family recovery, and
+  direct cross-family replacement, and the global forwarding gate is untouched.
 - Any other detected drift is handled as one ordered transaction: close
   forwarding, clear advertisements, converge and verify routing, converge and
   verify nftables, reopen forwarding, verify again, then republish

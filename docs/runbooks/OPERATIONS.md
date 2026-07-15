@@ -77,22 +77,31 @@ bootstrap deadlock and must not be treated as an external Tailnet outage.
 
 ## Exit Capability Degradation
 
-Each Exit default requires a fresh successful probe for its own address family
-through the currently discovered proxy TUN. Initial debounce, a family being
-unavailable, an expired success, or a proxy-link replacement produces an
-operational condition: readiness becomes false and only the affected family
-default is withdrawn. Healthy-family defaults, configured subnet
-advertisements, and ordinary Tailnet IPv6 remain intact. These conditions do
-not restart the process or create a technical-error retry storm.
+Each active Exit route requires a fresh successful probe for its own address
+family through the currently discovered proxy TUN. Initial debounce, an
+unavailable family, an expired success, or a proxy-link replacement produces an
+operational condition: readiness becomes false, the affected active route is
+removed, and its managed blackhole remains. These conditions do not restart the
+process or create a technical-error retry storm.
+
+Tailscale exposes an Exit Node only when both IPv4 and IPv6 defaults are
+advertised. While either family remains healthy, the Agent therefore preserves
+that atomic pair, configured subnet advertisements, and ordinary Tailnet IPv6.
+When both families are unavailable, it withdraws the pair before removing the
+final active route. Do not interpret an advertised default as proof that its
+family is currently usable; use readiness, family-labeled conditions, and table
+100 readback. The unavailable family must have no active default and must retain
+its blackhole.
 
 Use the bounded `internet_capability_available`,
 `internet_capability_probe_total`, `internet_capability_snapshot_age_seconds`,
 and `condition_active` metric families to identify the affected address family
 and state. Probe URLs, resolved addresses, and raw responses are intentionally
-absent from metrics and logs. A family recovery is not advertised until that
-family passes debounce and the Agent has repeated final routing, nftables, and
-kernel readback. Existing healthy-family advertisement is not withdrawn during
-this recovery.
+absent from metrics and logs. Recovery of the first healthy family publishes
+the atomic pair only after final routing, nftables, and kernel readback.
+Recovery of the second family changes only routing. A direct cross-family
+transition deletes and verifies the failed route before installing the
+recovered route; the pair remains advertised throughout.
 
 Endpoint values are cluster-owned production contracts. Do not substitute an
 unapproved public service during an incident. Confirm the approved endpoint's

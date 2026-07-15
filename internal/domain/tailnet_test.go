@@ -7,23 +7,33 @@ import (
 	"time"
 )
 
-func TestTailnetPreferencesExposeAndRemoveExitDefaultsWithoutChangingOtherRoutes(t *testing.T) {
+func TestTailnetPreferencesModelAtomicExitNodeAdvertisement(t *testing.T) {
 	routes := []netip.Prefix{
 		netip.MustParsePrefix("10.0.8.0/24"),
 		netip.MustParsePrefix("fd00:8::/64"),
 	}
-	preferences := NewTailnetPreferences(routes, AllExitDefaultRoutes())
+	preferences := NewTailnetExitNodePreferences(routes)
 	if got := preferences.ExitDefaultRoutes(); !got.Equal(AllExitDefaultRoutes()) {
 		t.Fatalf("exit default routes = %#v, want both families", got)
+	}
+	if !preferences.AdvertisesExitNode() || !preferences.HasExitDefaultRoutes() {
+		t.Fatalf("atomic Exit Node advertisement was not recognized: %#v", preferences)
 	}
 	if got := preferences.RoutesWithoutExitDefaults(); !slices.Equal(got, routes) {
 		t.Fatalf("non-Exit routes = %v, want %v", got, routes)
 	}
 
-	retained := preferences.WithoutExitDefaults(ExitDefaultRouteSet{IPv6: true})
-	want := NewTailnetPreferences(routes, ExitDefaultRouteSet{IPv4: true})
-	if !retained.Equal(want) {
-		t.Fatalf("removing IPv6 Exit default changed unrelated preferences: got %v, want %v", retained.AdvertiseRoutes, want.AdvertiseRoutes)
+	disabled := NewTailnetPreferences(routes)
+	if disabled.AdvertisesExitNode() || disabled.HasExitDefaultRoutes() || !slices.Equal(disabled.AdvertiseRoutes, routes) {
+		t.Fatalf("disabled Exit Node preferences are not canonical: %#v", disabled)
+	}
+
+	partial := NormalizeTailnetPreferences(append(slices.Clone(routes), DefaultPrefix(IPv4)))
+	if partial.AdvertisesExitNode() || !partial.HasExitDefaultRoutes() {
+		t.Fatalf("partial default-route observation was mistaken for an Exit Node: %#v", partial)
+	}
+	if got := partial.RoutesWithoutExitDefaults(); !slices.Equal(got, routes) {
+		t.Fatalf("partial observation changed non-Exit routes: got %v, want %v", got, routes)
 	}
 }
 

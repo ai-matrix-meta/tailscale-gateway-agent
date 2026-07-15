@@ -57,17 +57,17 @@ func TestDesiredRoutingKeepsUnavailableExitFamiliesBlackholed(t *testing.T) {
 	configuration := applicationTestConfiguration()
 	snapshot := applicationTestSnapshot()
 	tests := []struct {
-		name               string
-		activeExitDefaults domain.ExitDefaultRouteSet
-		active             domain.AddressFamily
-		blackholed         domain.AddressFamily
+		name                    string
+		activeExitDefaultRoutes domain.ExitDefaultRouteSet
+		active                  domain.AddressFamily
+		blackholed              domain.AddressFamily
 	}{
-		{name: "ipv4 only", activeExitDefaults: domain.ExitDefaultRouteSet{IPv4: true}, active: domain.IPv4, blackholed: domain.IPv6},
-		{name: "ipv6 only", activeExitDefaults: domain.ExitDefaultRouteSet{IPv6: true}, active: domain.IPv6, blackholed: domain.IPv4},
+		{name: "ipv4 only", activeExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv4: true}, active: domain.IPv4, blackholed: domain.IPv6},
+		{name: "ipv6 only", activeExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv6: true}, active: domain.IPv6, blackholed: domain.IPv4},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			state := buildDesiredRouting(configuration, snapshot, test.activeExitDefaults)
+			state := buildDesiredRouting(configuration, snapshot, test.activeExitDefaultRoutes)
 			active := requireRoute(t, state, test.active, configuration.Network.ExitRouteTable, domain.DefaultPrefix(test.active), domain.RouteUnicast)
 			if active.Link != snapshot.ProxyTunnelLink {
 				t.Fatalf("active family %d does not use the proxy tunnel: %#v", test.active, active)
@@ -81,20 +81,20 @@ func TestDesiredRoutingKeepsUnavailableExitFamiliesBlackholed(t *testing.T) {
 	}
 }
 
-func TestControllerPublishesOnlyAvailableExitDefaultsDuringInitialConvergence(t *testing.T) {
+func TestControllerPublishesAtomicExitNodeAdvertisementWhenAnyFamilyIsAvailable(t *testing.T) {
 	tests := []struct {
-		name                  string
-		availableExitDefaults domain.ExitDefaultRouteSet
+		name                       string
+		availableExitDefaultRoutes domain.ExitDefaultRouteSet
 	}{
-		{name: "ipv4 only", availableExitDefaults: domain.ExitDefaultRouteSet{IPv4: true}},
-		{name: "ipv6 only", availableExitDefaults: domain.ExitDefaultRouteSet{IPv6: true}},
+		{name: "ipv4 only", availableExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv4: true}},
+		{name: "ipv6 only", availableExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv6: true}},
 		{name: "neither family"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newControllerFixture(t)
 			now := time.Now()
-			fixture.capability.set(capabilitySnapshotForExitDefaults(fixture.discovery.snapshot.ProxyTunnelLink, now, test.availableExitDefaults))
+			fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(fixture.discovery.snapshot.ProxyTunnelLink, now, test.availableExitDefaultRoutes))
 			if err := fixture.controller.Prepare(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -102,25 +102,28 @@ func TestControllerPublishesOnlyAvailableExitDefaultsDuringInitialConvergence(t 
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantPreferences := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, test.availableExitDefaults)
+			wantPreferences := tailnetPreferencesForActiveExitRoutes(fixture.configuration.Tailnet.AdvertiseRoutes, test.availableExitDefaultRoutes)
 			if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
 				t.Fatalf("initial preferences = %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
 			}
 			if report.TailnetWrites != 1 || fixture.tailnet.writeCalls() != 1 {
-				t.Fatalf("initial family-specific advertisement was not one verified write: %#v", report)
+				t.Fatalf("initial atomic advertisement was not one verified write: %#v", report)
 			}
 			state := fixture.routing.currentState()
 			for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
-				if test.availableExitDefaults.Contains(family) {
+				if test.availableExitDefaultRoutes.Contains(family) {
 					requireRoute(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
 				} else {
 					assertRouteAbsent(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
 				}
 			}
-			for _, approval := range report.RouteApprovals {
-				family := domain.FamilyOfPrefix(approval.Prefix)
-				if approval.Prefix == domain.DefaultPrefix(family) && !test.availableExitDefaults.Contains(family) {
-					t.Fatalf("unadvertised Exit default entered approval observation: %#v", report.RouteApprovals)
+			for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+				prefix := domain.DefaultPrefix(family)
+				observed := slices.ContainsFunc(report.RouteApprovals, func(approval domain.RouteApproval) bool {
+					return approval.Prefix == prefix
+				})
+				if observed != !test.availableExitDefaultRoutes.Empty() {
+					t.Fatalf("family %d approval scope mismatch: active=%#v approvals=%#v", family, test.availableExitDefaultRoutes, report.RouteApprovals)
 				}
 			}
 		})
@@ -129,7 +132,7 @@ func TestControllerPublishesOnlyAvailableExitDefaultsDuringInitialConvergence(t 
 
 func TestControllerClearsRestoredAdvertisementsBeforeOpeningDataPlane(t *testing.T) {
 	fixture := newControllerFixture(t)
-	desiredPreferences := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, domain.AllExitDefaultRoutes())
+	desiredPreferences := domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
 	fixture.tailnet.state.Preferences = desiredPreferences
 
 	if err := fixture.controller.Prepare(context.Background()); err != nil {
@@ -214,7 +217,7 @@ func TestControllerReportsRouteApprovalLossAndRecoveryWithoutPreferenceWrites(t 
 			}
 			fixture.tailnet.resetWrites()
 			fixture.tailnet.setApprovedRoutes(slices.DeleteFunc(
-				domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, domain.AllExitDefaultRoutes()).AdvertiseRoutes,
+				domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes).AdvertiseRoutes,
 				func(prefix netip.Prefix) bool { return prefix == missing },
 			))
 
@@ -230,7 +233,7 @@ func TestControllerReportsRouteApprovalLossAndRecoveryWithoutPreferenceWrites(t 
 				t.Fatalf("explicit non-approval rewrote preferences: calls=%d report=%#v", fixture.tailnet.writeCalls(), report)
 			}
 
-			fixture.tailnet.setApprovedRoutes(domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, domain.AllExitDefaultRoutes()).AdvertiseRoutes)
+			fixture.tailnet.setApprovedRoutes(domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes).AdvertiseRoutes)
 			recovered, err := fixture.controller.Reconcile(context.Background())
 			if err != nil || len(recovered.Conditions) != 0 || !recovered.ApprovalObserved {
 				t.Fatalf("approval recovery did not become healthy: report=%#v err=%v", recovered, err)
@@ -258,13 +261,13 @@ func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 			fresh := domain.InternetFamilyCapability{Initialized: true, Available: true, ObservedAt: now, ValidUntil: now.Add(time.Minute)}
 			unavailable := domain.InternetFamilyCapability{Initialized: true, ObservedAt: now}
 			snapshot := domain.InternetCapabilitySnapshot{ProxyLink: link, IPv4: fresh, IPv6: fresh}
-			expectedExitDefaults := domain.AllExitDefaultRoutes()
+			expectedActiveExitDefaultRoutes := domain.AllExitDefaultRoutes()
 			if unavailableFamily == domain.IPv4 {
 				snapshot.IPv4 = unavailable
-				expectedExitDefaults.IPv4 = false
+				expectedActiveExitDefaultRoutes.IPv4 = false
 			} else {
 				snapshot.IPv6 = unavailable
-				expectedExitDefaults.IPv6 = false
+				expectedActiveExitDefaultRoutes.IPv6 = false
 			}
 
 			fixture.tailnet.resetWrites()
@@ -279,33 +282,38 @@ func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantCondition := domain.ReconcileCondition{Kind: domain.ConditionInternetCapabilityUnavailable, Family: unavailableFamily}
-			if !slices.Contains(lost.Conditions, wantCondition) || lost.TailnetWrites != 1 || fixture.tailnet.writeCalls() != 1 {
-				t.Fatalf("capability loss did not perform one bounded withdrawal: %#v", lost)
+			if !slices.Contains(lost.Conditions, wantCondition) || lost.TailnetWrites != 0 || fixture.tailnet.writeCalls() != 0 {
+				t.Fatalf("single-family loss changed the atomic Exit Node advertisement: %#v", lost)
 			}
 			if lost.RoutingWrites == 0 || fixture.routing.writeCalls() != 1 || lost.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
 				t.Fatalf("single-family loss touched unrelated data-plane state: report=%#v routing_calls=%d nftables_calls=%d", lost, fixture.routing.writeCalls(), fixture.packetFilter.writeCalls())
 			}
 			operations := fixture.recorder.snapshot()
-			withdrawal := slices.Index(operations, "exit-defaults-withdrawn")
-			routingWrite := slices.Index(operations, "routing")
-			if withdrawal < 0 || routingWrite < 0 || withdrawal > routingWrite || slices.Contains(operations, "advertisements-cleared") || slices.Contains(operations, "nftables-closed") || slices.Contains(operations, "nftables-open") {
+			routingWrite := lastValueIndex(operations, "routing")
+			lastRoutingRead := lastValueIndex(operations, "routing-read")
+			lastPacketRead := lastValueIndex(operations, "nftables-read")
+			if routingWrite < 0 || lastRoutingRead < routingWrite || lastPacketRead < routingWrite ||
+				slices.Contains(operations, "exit-node-withdrawn") || slices.Contains(operations, "advertisements-cleared") ||
+				slices.Contains(operations, "advertisements-published") || slices.Contains(operations, "nftables-closed") || slices.Contains(operations, "nftables-open") {
 				t.Fatalf("single-family loss violated isolated transaction ordering: %v", operations)
 			}
-			wantPreferences := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, expectedExitDefaults)
+			wantPreferences := tailnetPreferencesForActiveExitRoutes(fixture.configuration.Tailnet.AdvertiseRoutes, expectedActiveExitDefaultRoutes)
 			if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
 				t.Fatalf("single-family loss changed healthy advertisements: got %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
 			}
 			state := fixture.routing.currentState()
 			for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
-				if expectedExitDefaults.Contains(family) {
+				if expectedActiveExitDefaultRoutes.Contains(family) {
 					requireRoute(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
 				} else {
 					assertRouteAbsent(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
 				}
 			}
-			for _, approval := range lost.RouteApprovals {
-				if approval.Prefix == domain.DefaultPrefix(unavailableFamily) {
-					t.Fatalf("unadvertised Exit default was included in approval observation: %#v", lost.RouteApprovals)
+			for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+				if !slices.ContainsFunc(lost.RouteApprovals, func(approval domain.RouteApproval) bool {
+					return approval.Prefix == domain.DefaultPrefix(family)
+				}) {
+					t.Fatalf("atomic Exit Node approval omitted family %d: %#v", family, lost.RouteApprovals)
 				}
 			}
 
@@ -318,20 +326,21 @@ func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(recovered.Conditions) != 0 || recovered.TailnetWrites != 1 || fixture.tailnet.writeCalls() != 1 {
-				t.Fatalf("capability recovery did not perform one bounded publication: %#v", recovered)
+			if len(recovered.Conditions) != 0 || recovered.TailnetWrites != 0 || fixture.tailnet.writeCalls() != 0 {
+				t.Fatalf("single-family recovery changed the atomic Exit Node advertisement: %#v", recovered)
 			}
 			if recovered.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
 				t.Fatalf("single-family recovery touched the global forwarding gate: report=%#v calls=%d", recovered, fixture.packetFilter.writeCalls())
 			}
 			operations = fixture.recorder.snapshot()
-			published := slices.Index(operations, "advertisements-published")
-			lastRoutingRead := lastValueIndex(operations, "routing-read")
-			lastPacketRead := lastValueIndex(operations, "nftables-read")
-			if published < 0 || lastRoutingRead < 0 || lastPacketRead < 0 || published < lastRoutingRead || published < lastPacketRead || slices.Contains(operations, "advertisements-cleared") || slices.Contains(operations, "nftables-closed") {
-				t.Fatalf("Exit default was published before isolated data-plane verification: %v", operations)
+			lastRoutingWrite := lastValueIndex(operations, "routing")
+			lastRoutingRead = lastValueIndex(operations, "routing-read")
+			lastPacketRead = lastValueIndex(operations, "nftables-read")
+			if lastRoutingWrite < 0 || lastRoutingRead < lastRoutingWrite || lastPacketRead < lastRoutingWrite ||
+				slices.Contains(operations, "advertisements-cleared") || slices.Contains(operations, "advertisements-published") || slices.Contains(operations, "nftables-closed") {
+				t.Fatalf("recovered route was not fully verified without preference churn: %v", operations)
 			}
-			wantAll := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, domain.AllExitDefaultRoutes())
+			wantAll := domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
 			if got := fixture.tailnet.currentPreferences(); !got.Equal(wantAll) {
 				t.Fatalf("capability recovery did not restore both Exit defaults: %#v", got)
 			}
@@ -339,18 +348,16 @@ func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 	}
 }
 
-func TestControllerTransitionsBetweenSingleFamilyExitDefaultsWithoutGlobalQuarantine(t *testing.T) {
+func TestControllerWithdrawsAtomicExitNodeAdvertisementBeforeDeactivatingFinalRoute(t *testing.T) {
 	fixture := newControllerFixture(t)
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(
+		fixture.discovery.snapshot.ProxyTunnelLink,
+		time.Now(),
+		domain.ExitDefaultRouteSet{IPv4: true},
+	))
 	if err := fixture.controller.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	now := time.Now()
-	link := fixture.discovery.snapshot.ProxyTunnelLink
-	fixture.capability.set(capabilitySnapshotForExitDefaults(link, now, domain.ExitDefaultRouteSet{IPv4: true}))
 	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -361,34 +368,265 @@ func TestControllerTransitionsBetweenSingleFamilyExitDefaultsWithoutGlobalQuaran
 	fixture.recorder.reset()
 	fixture.routing.recordReads = true
 	fixture.packetFilter.recordReads = true
-	fixture.capability.set(capabilitySnapshotForExitDefaults(link, time.Now(), domain.ExitDefaultRouteSet{IPv6: true}))
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(
+		fixture.discovery.snapshot.ProxyTunnelLink,
+		time.Now(),
+		domain.ExitDefaultRouteSet{},
+	))
+
 	report, err := fixture.controller.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.TailnetWrites != 2 || fixture.tailnet.writeCalls() != 2 || report.RoutingWrites == 0 || fixture.routing.writeCalls() != 1 {
+	if report.TailnetWrites != 1 || fixture.tailnet.writeCalls() != 1 || report.RoutingWrites == 0 || fixture.routing.writeCalls() != 1 {
+		t.Fatalf("final capability loss was not a bounded withdrawal: report=%#v tailnet=%d routing=%d", report, fixture.tailnet.writeCalls(), fixture.routing.writeCalls())
+	}
+	if report.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
+		t.Fatalf("final capability loss touched the global forwarding gate: report=%#v calls=%d", report, fixture.packetFilter.writeCalls())
+	}
+	operations := fixture.recorder.snapshot()
+	withdrawal := slices.Index(operations, "exit-node-withdrawn")
+	routingWrite := slices.Index(operations, "routing")
+	if withdrawal < 0 || routingWrite <= withdrawal ||
+		slices.Contains(operations, "advertisements-cleared") || slices.Contains(operations, "advertisements-published") ||
+		slices.Contains(operations, "nftables-closed") || slices.Contains(operations, "nftables-open") {
+		t.Fatalf("Exit Node advertisement was not withdrawn before final-route deactivation: %v", operations)
+	}
+	plans := fixture.routing.appliedChanges()
+	if len(plans) != 1 || len(plans[0].UpsertRoutes) != 0 || len(plans[0].DeleteRoutes) != 1 ||
+		plans[0].DeleteRoutes[0].Family != domain.IPv4 {
+		t.Fatalf("final-route deactivation plan is not limited to the last active default: %#v", plans)
+	}
+	wantPreferences := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
+	if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
+		t.Fatalf("final capability loss produced %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
+	}
+	state := fixture.routing.currentState()
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		assertRouteAbsent(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
+		requireRoute(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+	}
+}
+
+func TestControllerPublishesAtomicExitNodeAdvertisementAfterFirstActiveRouteVerification(t *testing.T) {
+	fixture := newControllerFixture(t)
+	link := fixture.discovery.snapshot.ProxyTunnelLink
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{}))
+	if err := fixture.controller.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.tailnet.currentPreferences().HasExitDefaultRoutes() {
+		t.Fatal("Exit Node was advertised without an active Exit route")
+	}
+
+	fixture.tailnet.resetWrites()
+	fixture.routing.resetWrites()
+	fixture.packetFilter.resetWrites()
+	fixture.recorder.reset()
+	fixture.routing.recordReads = true
+	fixture.packetFilter.recordReads = true
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv4: true}))
+
+	report, err := fixture.controller.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.TailnetWrites != 1 || fixture.tailnet.writeCalls() != 1 || report.RoutingWrites == 0 || fixture.routing.writeCalls() != 1 {
+		t.Fatalf("first-family recovery was not a bounded publication: report=%#v tailnet=%d routing=%d", report, fixture.tailnet.writeCalls(), fixture.routing.writeCalls())
+	}
+	if report.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
+		t.Fatalf("first-family recovery touched the global forwarding gate: report=%#v calls=%d", report, fixture.packetFilter.writeCalls())
+	}
+	operations := fixture.recorder.snapshot()
+	publication := slices.Index(operations, "advertisements-published")
+	lastRoutingRead := lastValueIndex(operations, "routing-read")
+	lastPacketFilterRead := lastValueIndex(operations, "nftables-read")
+	if publication < 0 || lastRoutingRead < 0 || lastPacketFilterRead < 0 || publication <= lastRoutingRead || publication <= lastPacketFilterRead ||
+		slices.Contains(operations, "exit-node-withdrawn") || slices.Contains(operations, "advertisements-cleared") ||
+		slices.Contains(operations, "nftables-closed") || slices.Contains(operations, "nftables-open") {
+		t.Fatalf("atomic Exit Node advertisement preceded final data-plane verification: %v", operations)
+	}
+	wantPreferences := domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
+	if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
+		t.Fatalf("first-family recovery produced %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
+	}
+	state := fixture.routing.currentState()
+	requireRoute(t, state, domain.IPv4, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(domain.IPv4), domain.RouteUnicast)
+	assertRouteAbsent(t, state, domain.IPv6, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(domain.IPv6), domain.RouteUnicast)
+	requireRoute(t, state, domain.IPv6, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(domain.IPv6), domain.RouteBlackhole)
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		if !slices.ContainsFunc(report.RouteApprovals, func(approval domain.RouteApproval) bool {
+			return approval.Prefix == domain.DefaultPrefix(family)
+		}) {
+			t.Fatalf("atomic Exit Node approval omitted family %d: %#v", family, report.RouteApprovals)
+		}
+	}
+}
+
+func TestControllerMigratesPartialDefaultAdvertisementToAtomicExitNodeContract(t *testing.T) {
+	fixture := newControllerFixture(t)
+	link := fixture.discovery.snapshot.ProxyTunnelLink
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv4: true}))
+	if err := fixture.controller.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	partialRoutes := append(slices.Clone(fixture.configuration.Tailnet.AdvertiseRoutes), domain.DefaultPrefix(domain.IPv4))
+	fixture.tailnet.setPreferences(domain.NormalizeTailnetPreferences(partialRoutes))
+
+	fixture.tailnet.resetWrites()
+	fixture.routing.resetWrites()
+	fixture.packetFilter.resetWrites()
+	fixture.recorder.reset()
+	fixture.routing.recordReads = true
+	fixture.packetFilter.recordReads = true
+
+	report, err := fixture.controller.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.TailnetWrites != 1 || fixture.tailnet.writeCalls() != 1 || report.RoutingWrites != 0 || fixture.routing.writeCalls() != 0 ||
+		report.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
+		t.Fatalf("partial-advertisement migration touched unrelated state: report=%#v tailnet=%d routing=%d nftables=%d", report, fixture.tailnet.writeCalls(), fixture.routing.writeCalls(), fixture.packetFilter.writeCalls())
+	}
+	operations := fixture.recorder.snapshot()
+	publication := slices.Index(operations, "advertisements-published")
+	lastRoutingRead := lastValueIndex(operations, "routing-read")
+	lastPacketFilterRead := lastValueIndex(operations, "nftables-read")
+	if publication < 0 || publication <= lastRoutingRead || publication <= lastPacketFilterRead ||
+		slices.Contains(operations, "routing") || slices.Contains(operations, "nftables-closed") || slices.Contains(operations, "nftables-open") {
+		t.Fatalf("partial advertisement migrated without prior data-plane verification: %v", operations)
+	}
+	wantPreferences := domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
+	if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
+		t.Fatalf("partial advertisement migrated to %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
+	}
+}
+
+func TestControllerTransitionsBetweenSingleFamilyExitRoutesWithoutGlobalQuarantine(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if err := fixture.controller.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	link := fixture.discovery.snapshot.ProxyTunnelLink
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, now, domain.ExitDefaultRouteSet{IPv4: true}))
+	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.routing.injectObservedRoute(activeRoute(
+		fixture.configuration.Network,
+		domain.IPv6,
+		fixture.configuration.Network.ExitRouteTable,
+		domain.DefaultPrefix(domain.IPv6),
+		netip.Addr{},
+		domain.LinkIdentity{Index: 77, Name: "stale-proxy-path"},
+		false,
+	))
+
+	fixture.tailnet.resetWrites()
+	fixture.routing.resetWrites()
+	fixture.packetFilter.resetWrites()
+	fixture.recorder.reset()
+	fixture.routing.recordReads = true
+	fixture.packetFilter.recordReads = true
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv6: true}))
+	report, err := fixture.controller.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.TailnetWrites != 0 || fixture.tailnet.writeCalls() != 0 || report.RoutingWrites == 0 || fixture.routing.writeCalls() != 2 {
 		t.Fatalf("cross-family transition was not bounded: report=%#v tailnet=%d routing=%d", report, fixture.tailnet.writeCalls(), fixture.routing.writeCalls())
 	}
 	if report.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
 		t.Fatalf("cross-family transition touched the global forwarding gate: report=%#v calls=%d", report, fixture.packetFilter.writeCalls())
 	}
 	operations := fixture.recorder.snapshot()
-	withdrawal := slices.Index(operations, "exit-defaults-withdrawn")
-	routingWrite := slices.Index(operations, "routing")
-	published := slices.Index(operations, "advertisements-published")
+	firstRoutingWrite := slices.Index(operations, "routing")
+	lastRoutingWrite := lastValueIndex(operations, "routing")
 	lastRoutingRead := lastValueIndex(operations, "routing-read")
 	lastPacketRead := lastValueIndex(operations, "nftables-read")
-	if withdrawal < 0 || routingWrite < withdrawal || published < routingWrite || published < lastRoutingRead || published < lastPacketRead ||
-		slices.Contains(operations, "advertisements-cleared") || slices.Contains(operations, "nftables-closed") || slices.Contains(operations, "nftables-open") {
-		t.Fatalf("cross-family transition violated withdrawal/convergence/publication ordering: %v", operations)
+	intermediateReadback := -1
+	if firstRoutingWrite >= 0 && lastRoutingWrite > firstRoutingWrite {
+		intermediateReadback = slices.Index(operations[firstRoutingWrite+1:lastRoutingWrite], "routing-read")
 	}
-	wantPreferences := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, domain.ExitDefaultRouteSet{IPv6: true})
+	if firstRoutingWrite < 0 || lastRoutingWrite <= firstRoutingWrite || intermediateReadback < 0 || lastRoutingRead < lastRoutingWrite || lastPacketRead < lastRoutingWrite ||
+		slices.Contains(operations, "exit-node-withdrawn") || slices.Contains(operations, "advertisements-cleared") ||
+		slices.Contains(operations, "advertisements-published") || slices.Contains(operations, "nftables-closed") || slices.Contains(operations, "nftables-open") {
+		t.Fatalf("cross-family transition violated deactivate/activate/readback ordering: %v", operations)
+	}
+	plans := fixture.routing.appliedChanges()
+	if len(plans) != 2 || len(plans[0].DeleteRoutes) != 1 || len(plans[0].UpsertRoutes) != 0 ||
+		plans[0].DeleteRoutes[0].Family != domain.IPv4 || len(plans[1].UpsertRoutes) != 1 ||
+		len(plans[1].DeleteRoutes) != 0 || plans[1].UpsertRoutes[0].Family != domain.IPv6 {
+		t.Fatalf("cross-family route plans were not delete-before-upsert: %#v", plans)
+	}
+	wantPreferences := domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
 	if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
 		t.Fatalf("cross-family transition produced %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
 	}
 	state := fixture.routing.currentState()
 	assertRouteAbsent(t, state, domain.IPv4, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(domain.IPv4), domain.RouteUnicast)
-	requireRoute(t, state, domain.IPv6, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(domain.IPv6), domain.RouteUnicast)
+	activeIPv6Route := requireRoute(t, state, domain.IPv6, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(domain.IPv6), domain.RouteUnicast)
+	if activeIPv6Route.Link != link {
+		t.Fatalf("cross-family transition retained stale IPv6 route: %#v", activeIPv6Route)
+	}
+}
+
+func TestControllerStopsCrossFamilyActivationAfterUnexpectedDeactivationReadback(t *testing.T) {
+	fixture := newControllerFixture(t)
+	link := fixture.discovery.snapshot.ProxyTunnelLink
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv4: true}))
+	if err := fixture.controller.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.tailnet.resetWrites()
+	fixture.routing.resetWrites()
+	fixture.packetFilter.resetWrites()
+	fixture.recorder.reset()
+	fixture.routing.mutateAfterNextApply(func(state *domain.RoutingState) {
+		state.Routes = append(state.Routes, domain.Route{
+			Family:      domain.IPv4,
+			Disposition: domain.RouteBlackhole,
+			Table:       fixture.configuration.Network.ExitRouteTable,
+			Prefix:      netip.MustParsePrefix("192.0.2.0/24"),
+			Metric:      fixture.configuration.Network.FailClosedRouteMetric,
+		})
+	})
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv6: true}))
+
+	report, err := fixture.controller.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unexpected pending changes") {
+		t.Fatalf("unexpected deactivation readback did not stop activation: report=%#v err=%v", report, err)
+	}
+	if report.TailnetWrites != 0 || fixture.tailnet.writeCalls() != 0 || report.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
+		t.Fatalf("failed deactivation readback touched Tailnet or nftables: report=%#v tailnet=%d nftables=%d", report, fixture.tailnet.writeCalls(), fixture.packetFilter.writeCalls())
+	}
+	plans := fixture.routing.appliedChanges()
+	if len(plans) != 1 || len(plans[0].DeleteRoutes) != 1 || plans[0].DeleteRoutes[0].Family != domain.IPv4 || len(plans[0].UpsertRoutes) != 0 {
+		t.Fatalf("activation continued after failed deactivation readback: %#v", plans)
+	}
+	if got := fixture.tailnet.currentPreferences(); !got.AdvertisesExitNode() {
+		t.Fatalf("failed route transaction rewrote the atomic Exit Node advertisement: %v", got.AdvertiseRoutes)
+	}
+	state := fixture.routing.currentState()
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		assertRouteAbsent(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
+		requireRoute(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
+	}
 }
 
 func TestControllerUsesGlobalQuarantineWhenCapabilityChangeCoincidesWithUnrelatedDrift(t *testing.T) {
@@ -407,7 +645,7 @@ func TestControllerUsesGlobalQuarantineWhenCapabilityChangeCoincidesWithUnrelate
 	fixture.routing.resetWrites()
 	fixture.packetFilter.resetWrites()
 	fixture.recorder.reset()
-	fixture.capability.set(capabilitySnapshotForExitDefaults(
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(
 		fixture.discovery.snapshot.ProxyTunnelLink,
 		time.Now(),
 		domain.ExitDefaultRouteSet{IPv4: true},
@@ -418,7 +656,6 @@ func TestControllerUsesGlobalQuarantineWhenCapabilityChangeCoincidesWithUnrelate
 		t.Fatal(err)
 	}
 	wantOrder := []string{
-		"exit-defaults-withdrawn",
 		"nftables-closed",
 		"advertisements-cleared",
 		"routing",
@@ -428,20 +665,70 @@ func TestControllerUsesGlobalQuarantineWhenCapabilityChangeCoincidesWithUnrelate
 	if got := fixture.recorder.snapshot(); !slices.Equal(got, wantOrder) {
 		t.Fatalf("unrelated drift bypassed global quarantine: got %v, want %v", got, wantOrder)
 	}
-	if report.TailnetWrites != 3 || report.RoutingWrites == 0 || report.PacketFilterWrites != 2 {
+	if report.TailnetWrites != 2 || report.RoutingWrites == 0 || report.PacketFilterWrites != 2 {
 		t.Fatalf("global fallback transaction reported unexpected writes: %#v", report)
 	}
-	wantPreferences := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, domain.ExitDefaultRouteSet{IPv4: true})
+	wantPreferences := domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
 	if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
-		t.Fatalf("global fallback did not restore the family-specific target: got %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
+		t.Fatalf("global fallback did not restore the atomic Exit Node target: got %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
+	}
+}
+
+func TestControllerUsesOneGlobalTransactionWhenFinalCapabilityLossCoincidesWithUnrelatedDrift(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if err := fixture.controller.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.packetFilter.mutex.Lock()
+	fixture.packetFilter.observation.FilterRevision = "externally-modified"
+	fixture.packetFilter.mutex.Unlock()
+	fixture.tailnet.resetWrites()
+	fixture.routing.resetWrites()
+	fixture.packetFilter.resetWrites()
+	fixture.recorder.reset()
+	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(
+		fixture.discovery.snapshot.ProxyTunnelLink,
+		time.Now(),
+		domain.ExitDefaultRouteSet{},
+	))
+
+	report, err := fixture.controller.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOrder := []string{
+		"nftables-closed",
+		"advertisements-cleared",
+		"routing",
+		"nftables-open",
+		"advertisements-published",
+	}
+	if got := fixture.recorder.snapshot(); !slices.Equal(got, wantOrder) {
+		t.Fatalf("final capability loss fragmented the global transaction: got %v, want %v", got, wantOrder)
+	}
+	if report.TailnetWrites != 2 || fixture.tailnet.writeCalls() != 2 || report.RoutingWrites == 0 || report.PacketFilterWrites != 2 {
+		t.Fatalf("global final-loss transaction reported unexpected writes: report=%#v tailnet=%d", report, fixture.tailnet.writeCalls())
+	}
+	wantPreferences := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
+	if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
+		t.Fatalf("global final-loss transaction produced %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
+	}
+	state := fixture.routing.currentState()
+	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
+		assertRouteAbsent(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
+		requireRoute(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteBlackhole)
 	}
 }
 
 func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *testing.T) {
 	tests := []struct {
-		name                 string
-		snapshot             func(domain.LinkIdentity, time.Time) domain.InternetCapabilitySnapshot
-		expectedExitDefaults domain.ExitDefaultRouteSet
+		name                            string
+		snapshot                        func(domain.LinkIdentity, time.Time) domain.InternetCapabilitySnapshot
+		expectedActiveExitDefaultRoutes domain.ExitDefaultRouteSet
 	}{
 		{
 			name: "initializing",
@@ -450,8 +737,8 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 			},
 		},
 		{
-			name:                 "ipv4 unavailable",
-			expectedExitDefaults: domain.ExitDefaultRouteSet{IPv6: true},
+			name:                            "ipv4 unavailable",
+			expectedActiveExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv6: true},
 			snapshot: func(link domain.LinkIdentity, now time.Time) domain.InternetCapabilitySnapshot {
 				fresh := domain.InternetFamilyCapability{Initialized: true, Available: true, ObservedAt: now, ValidUntil: now.Add(time.Minute)}
 				return domain.InternetCapabilitySnapshot{
@@ -462,8 +749,8 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 			},
 		},
 		{
-			name:                 "ipv6 unavailable",
-			expectedExitDefaults: domain.ExitDefaultRouteSet{IPv4: true},
+			name:                            "ipv6 unavailable",
+			expectedActiveExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv4: true},
 			snapshot: func(link domain.LinkIdentity, now time.Time) domain.InternetCapabilitySnapshot {
 				fresh := domain.InternetFamilyCapability{Initialized: true, Available: true, ObservedAt: now, ValidUntil: now.Add(time.Minute)}
 				return domain.InternetCapabilitySnapshot{
@@ -481,8 +768,8 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 			},
 		},
 		{
-			name:                 "stale",
-			expectedExitDefaults: domain.ExitDefaultRouteSet{IPv6: true},
+			name:                            "stale",
+			expectedActiveExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv6: true},
 			snapshot: func(link domain.LinkIdentity, now time.Time) domain.InternetCapabilitySnapshot {
 				fresh := domain.InternetFamilyCapability{Initialized: true, Available: true, ObservedAt: now, ValidUntil: now.Add(time.Minute)}
 				stale := domain.InternetFamilyCapability{Initialized: true, Available: true, ObservedAt: now.Add(-2 * time.Minute), ValidUntil: now.Add(-time.Minute)}
@@ -519,19 +806,23 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 			if err != nil {
 				t.Fatalf("operational capability state became a technical error: %v", err)
 			}
-			if len(reconciled.Conditions) == 0 || reconciled.TailnetWrites != 1 || fixture.tailnet.writeCalls() != 1 {
-				t.Fatalf("capability state did not perform one bounded preference transition: %#v", reconciled)
+			expectedTailnetWrites := 0
+			if test.expectedActiveExitDefaultRoutes.Empty() {
+				expectedTailnetWrites = 1
+			}
+			if len(reconciled.Conditions) == 0 || reconciled.TailnetWrites != expectedTailnetWrites || fixture.tailnet.writeCalls() != expectedTailnetWrites {
+				t.Fatalf("capability state changed the atomic advertisement unexpectedly: %#v", reconciled)
 			}
 			if reconciled.RoutingWrites == 0 || fixture.routing.writeCalls() != 1 || reconciled.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
 				t.Fatalf("capability state did not remain isolated to Exit defaults: report=%#v routing_calls=%d nftables_calls=%d", reconciled, fixture.routing.writeCalls(), fixture.packetFilter.writeCalls())
 			}
-			wantPreferences := domain.NewTailnetPreferences(fixture.configuration.Tailnet.AdvertiseRoutes, test.expectedExitDefaults)
+			wantPreferences := tailnetPreferencesForActiveExitRoutes(fixture.configuration.Tailnet.AdvertiseRoutes, test.expectedActiveExitDefaultRoutes)
 			if got := fixture.tailnet.currentPreferences(); !got.Equal(wantPreferences) {
-				t.Fatalf("capability state produced wrong family-specific preferences: got %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
+				t.Fatalf("capability state produced wrong atomic Exit Node preferences: got %v, want %v", got.AdvertiseRoutes, wantPreferences.AdvertiseRoutes)
 			}
 			state := fixture.routing.currentState()
 			for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
-				if test.expectedExitDefaults.Contains(family) {
+				if test.expectedActiveExitDefaultRoutes.Contains(family) {
 					requireRoute(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
 				} else {
 					assertRouteAbsent(t, state, family, fixture.configuration.Network.ExitRouteTable, domain.DefaultPrefix(family), domain.RouteUnicast)
@@ -956,10 +1247,10 @@ func newControllerFixture(t *testing.T) *controllerFixture {
 		state: domain.TailnetState{
 			Running: true, KernelTunnel: true,
 			SelfAddresses: []netip.Addr{netip.MustParseAddr("100.64.0.8"), netip.MustParseAddr("fd7a:115c:a1e0::8")},
-			Preferences:   domain.NewTailnetPreferences(nil, domain.ExitDefaultRouteSet{}),
+			Preferences:   domain.NewTailnetPreferences(nil),
 			Control: domain.TailnetControlObservation{
 				SelfPresent: true, InNetworkMap: true, Online: true, AllowedIPsAvailable: true,
-				ApprovedRoutes: domain.NewTailnetPreferences(configuration.Tailnet.AdvertiseRoutes, domain.AllExitDefaultRoutes()).AdvertiseRoutes,
+				ApprovedRoutes: domain.NewTailnetExitNodePreferences(configuration.Tailnet.AdvertiseRoutes).AdvertiseRoutes,
 				ObservedAt:     time.Now(),
 			},
 		},
@@ -1014,7 +1305,7 @@ func applicationTestSnapshot() domain.NetworkSnapshot {
 	}
 }
 
-func capabilitySnapshotForExitDefaults(link domain.LinkIdentity, now time.Time, available domain.ExitDefaultRouteSet) domain.InternetCapabilitySnapshot {
+func capabilitySnapshotForActiveExitDefaultRoutes(link domain.LinkIdentity, now time.Time, availableRoutes domain.ExitDefaultRouteSet) domain.InternetCapabilitySnapshot {
 	fresh := domain.InternetFamilyCapability{
 		Initialized: true,
 		Available:   true,
@@ -1023,13 +1314,20 @@ func capabilitySnapshotForExitDefaults(link domain.LinkIdentity, now time.Time, 
 	}
 	unavailable := domain.InternetFamilyCapability{Initialized: true, ObservedAt: now}
 	snapshot := domain.InternetCapabilitySnapshot{ProxyLink: link, IPv4: unavailable, IPv6: unavailable}
-	if available.IPv4 {
+	if availableRoutes.IPv4 {
 		snapshot.IPv4 = fresh
 	}
-	if available.IPv6 {
+	if availableRoutes.IPv6 {
 		snapshot.IPv6 = fresh
 	}
 	return snapshot
+}
+
+func tailnetPreferencesForActiveExitRoutes(advertisedRoutes []netip.Prefix, activeRoutes domain.ExitDefaultRouteSet) domain.TailnetPreferences {
+	if activeRoutes.Empty() {
+		return domain.NewTailnetPreferences(advertisedRoutes)
+	}
+	return domain.NewTailnetExitNodePreferences(advertisedRoutes)
 }
 
 func requireRoute(t *testing.T, state domain.RoutingState, family domain.AddressFamily, table int, prefix netip.Prefix, disposition domain.RouteDisposition) domain.Route {
@@ -1193,12 +1491,14 @@ func (discovery *fakeDiscovery) DiscoverProxyTunnel(ctx context.Context, request
 }
 
 type fakeRoutingStore struct {
-	mutex       sync.Mutex
-	state       domain.RoutingState
-	writes      int
-	applyCount  int
-	recorder    *operationRecorder
-	recordReads bool
+	mutex                  sync.Mutex
+	state                  domain.RoutingState
+	writes                 int
+	applyCount             int
+	applied                []domain.RoutingChanges
+	recorder               *operationRecorder
+	recordReads            bool
+	mutationAfterNextApply func(*domain.RoutingState)
 }
 
 func (store *fakeRoutingStore) ReadRouting(context.Context, domain.RoutingOwnership) (domain.RoutingState, error) {
@@ -1214,8 +1514,14 @@ func (store *fakeRoutingStore) ApplyRouting(_ context.Context, changes domain.Ro
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 	store.applyCount++
+	store.applied = append(store.applied, cloneRoutingChanges(changes))
 	store.recorder.add("routing")
 	store.state = applyRoutingChanges(store.state, changes)
+	if store.mutationAfterNextApply != nil {
+		mutation := store.mutationAfterNextApply
+		store.mutationAfterNextApply = nil
+		mutation(&store.state)
+	}
 	writes := len(changes.UpsertRoutes) + len(changes.DeleteRules) + len(changes.AddRules) + len(changes.DeleteRoutes)
 	store.writes += writes
 	return writes, nil
@@ -1226,6 +1532,7 @@ func (store *fakeRoutingStore) resetWrites() {
 	defer store.mutex.Unlock()
 	store.writes = 0
 	store.applyCount = 0
+	store.applied = nil
 }
 
 func (store *fakeRoutingStore) writeCalls() int {
@@ -1234,10 +1541,33 @@ func (store *fakeRoutingStore) writeCalls() int {
 	return store.applyCount
 }
 
+func (store *fakeRoutingStore) appliedChanges() []domain.RoutingChanges {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	result := make([]domain.RoutingChanges, len(store.applied))
+	for index := range store.applied {
+		result[index] = cloneRoutingChanges(store.applied[index])
+	}
+	return result
+}
+
 func (store *fakeRoutingStore) currentState() domain.RoutingState {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 	return cloneRoutingState(store.state)
+}
+
+func (store *fakeRoutingStore) injectObservedRoute(route domain.Route) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	store.state.Routes = removeRouteIdentity(store.state.Routes, route)
+	store.state.Routes = append(store.state.Routes, route)
+}
+
+func (store *fakeRoutingStore) mutateAfterNextApply(mutation func(*domain.RoutingState)) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	store.mutationAfterNextApply = mutation
 }
 
 type fakePacketFilterStore struct {
@@ -1380,13 +1710,11 @@ func (control *fakeTailnetControl) WritePreferences(_ context.Context, preferenc
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	control.writes++
-	currentExitDefaults := control.state.Preferences.ExitDefaultRoutes()
-	targetExitDefaults := preferences.ExitDefaultRoutes()
 	switch {
 	case len(preferences.AdvertiseRoutes) == 0:
 		control.recorder.add("advertisements-cleared")
-	case !currentExitDefaults.Difference(targetExitDefaults).Empty():
-		control.recorder.add("exit-defaults-withdrawn")
+	case control.state.Preferences.HasExitDefaultRoutes() && !preferences.AdvertisesExitNode():
+		control.recorder.add("exit-node-withdrawn")
 	default:
 		control.recorder.add("advertisements-published")
 	}
@@ -1415,6 +1743,12 @@ func (control *fakeTailnetControl) setApprovedRoutes(routes []netip.Prefix) {
 	control.state.Control.ObservedAt = time.Now()
 }
 
+func (control *fakeTailnetControl) setPreferences(preferences domain.TailnetPreferences) {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	control.state.Preferences = domain.TailnetPreferences{AdvertiseRoutes: slices.Clone(preferences.AdvertiseRoutes)}
+}
+
 func (control *fakeTailnetControl) currentPreferences() domain.TailnetPreferences {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
@@ -1441,6 +1775,15 @@ func (capability *fakeInternetCapability) set(snapshot domain.InternetCapability
 
 func cloneRoutingState(state domain.RoutingState) domain.RoutingState {
 	return domain.RoutingState{Routes: slices.Clone(state.Routes), Rules: slices.Clone(state.Rules)}
+}
+
+func cloneRoutingChanges(changes domain.RoutingChanges) domain.RoutingChanges {
+	return domain.RoutingChanges{
+		UpsertRoutes: slices.Clone(changes.UpsertRoutes),
+		DeleteRules:  slices.Clone(changes.DeleteRules),
+		AddRules:     slices.Clone(changes.AddRules),
+		DeleteRoutes: slices.Clone(changes.DeleteRoutes),
+	}
 }
 
 func applyRoutingChanges(state domain.RoutingState, changes domain.RoutingChanges) domain.RoutingState {

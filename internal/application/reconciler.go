@@ -115,7 +115,7 @@ func (controller *Controller) Prepare(ctx context.Context) error {
 
 func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileReport, error) {
 	report := domain.ReconcileReport{}
-	disabledPreferences := domain.NewTailnetPreferences(nil, domain.ExitDefaultRouteSet{})
+	disabledPreferences := domain.NewTailnetPreferences(nil)
 	if err := controller.dependencies.Kernel.Check(ctx); err != nil {
 		return report, fmt.Errorf("verify kernel prerequisites: %w", err)
 	}
@@ -172,7 +172,7 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 	}
 	controller.lastTailnetLink = snapshot.TailnetLink
 
-	exitDefaults := domain.ExitDefaultRouteSet{}
+	activeExitDefaultRoutes := domain.ExitDefaultRouteSet{}
 	if controller.configuration.Tailnet.AdvertiseExitNode {
 		capabilitySnapshot, capabilityErr := controller.dependencies.InternetCapability.Observe(ctx, snapshot.ProxyTunnelLink)
 		if capabilityErr != nil {
@@ -183,28 +183,20 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 			return report, evaluationErr
 		}
 		report.Conditions = append(report.Conditions, evaluation.conditions...)
-		exitDefaults = evaluation.exitDefaults
+		activeExitDefaultRoutes = evaluation.activeExitDefaultRoutes
 	}
-	desiredRouting := buildDesiredRouting(controller.configuration, snapshot, exitDefaults)
+	desiredRouting := buildDesiredRouting(controller.configuration, snapshot, activeExitDefaultRoutes)
 	desiredPolicy := controller.packetFilterPolicy(snapshot, localEgressAddresses, false)
-	desiredPreferences := domain.NewTailnetPreferences(controller.configuration.Tailnet.AdvertiseRoutes, exitDefaults)
-	exitDefaultTransition, onlyExitDefaultsChanged := classifyExitDefaultAdvertisementTransition(tailnetState.Preferences, desiredPreferences)
-	if onlyExitDefaultsChanged && !exitDefaultTransition.advertisementsToWithdraw.Empty() {
-		preConvergencePreferences := desiredPreferences.WithoutExitDefaults(exitDefaultTransition.advertisementsToPublish)
-		if !tailnetState.Preferences.Equal(preConvergencePreferences) {
-			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, preConvergencePreferences)
-			if writeErr != nil {
-				return report, fmt.Errorf("withdraw unavailable Exit default advertisements: %w", writeErr)
-			}
-			report.TailnetWrites++
-			report.Changed = true
-			tailnetState = verifiedState
-		}
+	desiredPreferences := domain.NewTailnetPreferences(controller.configuration.Tailnet.AdvertiseRoutes)
+	if !activeExitDefaultRoutes.Empty() {
+		desiredPreferences = domain.NewTailnetExitNodePreferences(controller.configuration.Tailnet.AdvertiseRoutes)
 	}
+	nonExitPreferencesMatch := slices.Equal(tailnetState.Preferences.RoutesWithoutExitDefaults(), desiredPreferences.RoutesWithoutExitDefaults())
 	routingChanges, err := controller.planRouting(ctx, desiredRouting)
 	if err != nil {
 		return report, err
 	}
+	exitDefaultTransition, onlyExitDefaultRoutesChanged := classifyExitDefaultRouteTransition(routingChanges, controller.configuration.Network)
 	packetFilterObservation, err := controller.observePacketFilter(ctx, desiredPolicy)
 	if err != nil {
 		return report, err
@@ -231,11 +223,21 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 		controller.recordRouteApprovals(&report, tailnetState, desiredPreferences)
 		return report, nil
 	}
-	isolatedExitDefaultTransition := onlyExitDefaultsChanged &&
-		packetFilterObservation.Matches(desiredPolicy) &&
-		routingChangesMatchExitDefaultTransition(routingChanges, controller.configuration.Network, exitDefaultTransition)
+	isolatedExitDefaultTransition := nonExitPreferencesMatch && onlyExitDefaultRoutesChanged &&
+		packetFilterObservation.Matches(desiredPolicy)
 	if isolatedExitDefaultTransition {
-		routingWrites, applyErr := controller.applyRoutingPlan(ctx, desiredRouting, routingChanges)
+		if !desiredPreferences.AdvertisesExitNode() && tailnetState.Preferences.HasExitDefaultRoutes() {
+			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
+			if writeErr != nil {
+				return report, fmt.Errorf("withdraw Exit Node advertisement before deactivating its final route: %w", writeErr)
+			}
+			report.TailnetWrites++
+			report.Changed = true
+			tailnetState = verifiedState
+		}
+		routingWrites, applyErr := controller.applyExitDefaultRouteTransition(
+			ctx, desiredRouting, exitDefaultTransition,
+		)
 		report.RoutingWrites += routingWrites
 		report.Changed = report.Changed || routingWrites > 0
 		if applyErr != nil {
@@ -250,7 +252,7 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 		if !tailnetState.Preferences.Equal(desiredPreferences) {
 			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
 			if writeErr != nil {
-				return report, fmt.Errorf("publish available Exit default advertisements: %w", writeErr)
+				return report, fmt.Errorf("publish atomic Exit Node advertisement after route verification: %w", writeErr)
 			}
 			report.TailnetWrites++
 			report.Changed = true
@@ -325,6 +327,32 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 	controller.quarantined = false
 	controller.recordRouteApprovals(&report, tailnetState, desiredPreferences)
 	return report, nil
+}
+
+func (controller *Controller) applyExitDefaultRouteTransition(
+	ctx context.Context,
+	desiredRouting domain.RoutingState,
+	transition exitDefaultRouteTransition,
+) (int, error) {
+	writes := 0
+	if !transition.deactivationChanges.Empty() {
+		deactivationWrites, err := controller.applyRoutingChanges(ctx, transition.deactivationChanges)
+		writes += deactivationWrites
+		if err != nil {
+			return writes, fmt.Errorf("deactivate unavailable Exit default routes: %w", err)
+		}
+		if err := controller.verifyPendingRoutingChanges(ctx, desiredRouting, transition.activationChanges); err != nil {
+			return writes, fmt.Errorf("verify Exit default route deactivation: %w", err)
+		}
+	}
+	if !transition.activationChanges.Empty() {
+		activationWrites, err := controller.applyRoutingPlan(ctx, desiredRouting, transition.activationChanges)
+		writes += activationWrites
+		if err != nil {
+			return writes, fmt.Errorf("activate available Exit default routes: %w", err)
+		}
+	}
+	return writes, nil
 }
 
 func (controller *Controller) FailClosed(ctx context.Context) (domain.ReconcileReport, error) {
@@ -405,7 +433,7 @@ func (controller *Controller) failClosed(ctx context.Context, retainLocalControl
 	tailnetState, readErr := controller.readTailnetState(ctx)
 	var preferenceErr error
 	if readErr == nil {
-		disabled := domain.NewTailnetPreferences(nil, domain.ExitDefaultRouteSet{})
+		disabled := domain.NewTailnetPreferences(nil)
 		if !tailnetState.Preferences.Equal(disabled) {
 			_, preferenceErr = controller.writeAndVerifyTailnetPreferences(ctx, disabled)
 			if preferenceErr == nil {
@@ -479,14 +507,36 @@ func (controller *Controller) applyRoutingPlan(ctx context.Context, desired doma
 	if changes.Empty() {
 		return 0, nil
 	}
-	writes, err := controller.dependencies.Routing.ApplyRouting(ctx, changes)
+	writes, err := controller.applyRoutingChanges(ctx, changes)
 	if err != nil {
-		return writes, fmt.Errorf("apply managed routing state: %w", err)
+		return writes, err
 	}
 	if err := controller.verifyRouting(ctx, desired); err != nil {
 		return writes, err
 	}
 	return writes, nil
+}
+
+func (controller *Controller) applyRoutingChanges(ctx context.Context, changes domain.RoutingChanges) (int, error) {
+	if changes.Empty() {
+		return 0, nil
+	}
+	writes, err := controller.dependencies.Routing.ApplyRouting(ctx, changes)
+	if err != nil {
+		return writes, fmt.Errorf("apply managed routing state: %w", err)
+	}
+	return writes, nil
+}
+
+func (controller *Controller) verifyPendingRoutingChanges(ctx context.Context, desired domain.RoutingState, expected domain.RoutingChanges) error {
+	remaining, err := controller.planRouting(ctx, desired)
+	if err != nil {
+		return err
+	}
+	if !remaining.Equal(expected) {
+		return fmt.Errorf("managed routing transition has unexpected pending changes: got %#v, want %#v", remaining, expected)
+	}
+	return nil
 }
 
 func (controller *Controller) verifyRouting(ctx context.Context, desired domain.RoutingState) error {

@@ -10,8 +10,9 @@ operational content must be placed in one of the ownership categories below.
   ownership, discovery, state transitions, fail-closed behavior, and release
   invariants.
 - [Exit capability and route approval](architecture/EXIT-CAPABILITY.md):
-  in-process family-granular probing, control-plane approval, advertisement
-  transactions, security constraints, and validation evidence.
+  in-process family-granular probing, atomic Exit Node advertisement,
+  control-plane approval, route transactions, security constraints, and
+  validation evidence.
 
 ## Reference
 
