@@ -273,7 +273,7 @@ func TestResolveRouteAcceptsKernelMTUDiscoveryMetric(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolution.Link != (domain.LinkIdentity{Index: 4, Name: "underlay"}) || resolution.Gateway != netip.MustParseAddr("10.42.0.1") {
+	if resolution.Link != (domain.LinkIdentity{Index: 4, Name: "internal-path"}) || resolution.Gateway != netip.MustParseAddr("10.42.0.1") {
 		t.Fatalf("route projection changed while accepting MTU: %#v", resolution)
 	}
 }
