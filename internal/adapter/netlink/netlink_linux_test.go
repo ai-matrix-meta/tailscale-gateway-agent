@@ -250,7 +250,7 @@ func TestResolveRouteFailsClosedForUnsafeKernelResults(t *testing.T) {
 		{name: "interface disappeared", routes: []vnetlink.Route{base}, setup: func(kernel *fakeKernel) { delete(kernel.links, 4) }},
 		{name: "interface down", routes: []vnetlink.Route{base}, setup: func(kernel *fakeKernel) { kernel.links[4].Attrs().Flags = 0 }},
 		{name: "unsupported attributes", routes: []vnetlink.Route{withRouteFlags(base, unix.RTNH_F_PERVASIVE)}},
-		{name: "route-specific MTU", routes: []vnetlink.Route{withRouteMTU(base, 1280)}},
+		{name: "locked MTU", routes: []vnetlink.Route{withRouteMTULock(base)}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -263,6 +263,33 @@ func TestResolveRouteFailsClosedForUnsafeKernelResults(t *testing.T) {
 				t.Fatal("unsafe route result was accepted")
 			}
 		})
+	}
+}
+
+func TestResolveRouteAcceptsKernelMTUDiscoveryMetric(t *testing.T) {
+	kernel := testKernel()
+	kernel.routesByTarget["10.0.8.1"] = []vnetlink.Route{withRouteMTU(testRoute("10.0.8.0/24", 4, "10.42.0.1", vnetlink.SCOPE_UNIVERSE, 0), 1450)}
+	resolution, err := (&Adapter{kernel: kernel}).resolveRoute(context.Background(), netip.MustParseAddr("10.0.8.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.Link != (domain.LinkIdentity{Index: 4, Name: "underlay"}) || resolution.Gateway != netip.MustParseAddr("10.42.0.1") {
+		t.Fatalf("route projection changed while accepting MTU: %#v", resolution)
+	}
+}
+
+func TestManagedRouteObservationStillMarksMTUUnexpected(t *testing.T) {
+	adapter := &Adapter{kernel: testKernel()}
+	observed, err := adapter.routeFromNetlink(domain.IPv4, withRouteMTU(vnetlink.Route{
+		Family: vnetlink.FAMILY_V4, Table: 100, Protocol: agentRouteProtocol,
+		Type: unix.RTN_UNICAST, Scope: vnetlink.SCOPE_UNIVERSE,
+		Dst: ipNetFromPrefix(netip.MustParsePrefix("10.0.8.0/24")), LinkIndex: 4, Priority: 100,
+	}, 1450))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.UnexpectedAttributes {
+		t.Fatalf("managed route MTU was not treated as unexpected: %#v", observed)
 	}
 }
 
@@ -649,6 +676,11 @@ func withRouteFlags(route vnetlink.Route, flags int) vnetlink.Route {
 
 func withRouteMTU(route vnetlink.Route, mtu int) vnetlink.Route {
 	route.MTU = mtu
+	return route
+}
+
+func withRouteMTULock(route vnetlink.Route) vnetlink.Route {
+	route.MTULock = true
 	return route
 }
 

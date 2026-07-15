@@ -612,15 +612,23 @@ func routeDisposition(routeType int) domain.RouteDisposition {
 }
 
 func routeHasUnsupportedDiscoveryAttributes(route vnetlink.Route) bool {
-	return route.ILinkIndex != 0 || route.MPLSDst != nil || route.NewDst != nil || route.Encap != nil || route.Via != nil || route.Realm != 0 || route.Tos != 0 || route.Flags & ^unix.RTNH_F_ONLINK != 0 || routeHasUnsupportedMetrics(route)
+	return routeHasUnsupportedBaseAttributes(route) || routeHasUnsupportedDiscoveryMetrics(route)
 }
 
 func routeHasUnsupportedManagedAttributes(route vnetlink.Route) bool {
-	return routeHasUnsupportedDiscoveryAttributes(route) || len(route.MultiPath) != 0 || len(route.Src) != 0
+	return routeHasUnsupportedBaseAttributes(route) || routeHasUnsupportedManagedMetrics(route) || len(route.MultiPath) != 0 || len(route.Src) != 0
 }
 
-func routeHasUnsupportedMetrics(route vnetlink.Route) bool {
-	return route.MTU != 0 || route.MTULock || route.Window != 0 || route.Rtt != 0 || route.RttVar != 0 || route.Ssthresh != 0 || route.Cwnd != 0 || route.AdvMSS != 0 || route.Reordering != 0 || route.Hoplimit != 0 || route.InitCwnd != 0 || route.Features != 0 || route.RtoMin != 0 || route.RtoMinLock || route.InitRwnd != 0 || route.QuickACK != 0 || route.Congctl != "" || route.FastOpenNoCookie != 0
+func routeHasUnsupportedBaseAttributes(route vnetlink.Route) bool {
+	return route.ILinkIndex != 0 || route.MPLSDst != nil || route.NewDst != nil || route.Encap != nil || route.Via != nil || route.Realm != 0 || route.Tos != 0 || route.Flags & ^unix.RTNH_F_ONLINK != 0
+}
+
+func routeHasUnsupportedDiscoveryMetrics(route vnetlink.Route) bool {
+	return route.MTULock || route.Window != 0 || route.Rtt != 0 || route.RttVar != 0 || route.Ssthresh != 0 || route.Cwnd != 0 || route.AdvMSS != 0 || route.Reordering != 0 || route.Hoplimit != 0 || route.InitCwnd != 0 || route.Features != 0 || route.RtoMin != 0 || route.RtoMinLock || route.InitRwnd != 0 || route.QuickACK != 0 || route.Congctl != "" || route.FastOpenNoCookie != 0
+}
+
+func routeHasUnsupportedManagedMetrics(route vnetlink.Route) bool {
+	return route.MTU != 0 || routeHasUnsupportedDiscoveryMetrics(route)
 }
 
 func ipNetFromPrefix(prefix netip.Prefix) *net.IPNet {
