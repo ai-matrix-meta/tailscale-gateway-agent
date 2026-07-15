@@ -99,13 +99,15 @@ maximum polling window for control-plane approval changes.
 - `TAILSCALE_GATEWAY_CAPABILITY_PROBE_SUCCESS_THRESHOLD`: `2`.
 - `TAILSCALE_GATEWAY_CAPABILITY_PROBE_FAILURE_THRESHOLD`: `2`.
 
-When Exit advertisement is enabled, both endpoint URLs are required. When it
-is disabled, both variables must be absent. Endpoints have no program default
-and remain cluster-owned production decisions. Their static URL, timing, and
-threshold contracts and their runtime DNS/TLS/HTTP requirements are defined in
+When Exit advertisement is enabled, both endpoint URLs are required because the
+Agent must independently observe both address families. When it is disabled,
+both variables must be absent. Endpoints have no program default and remain
+cluster-owned production decisions. Their static URL, timing, and threshold
+contracts and their runtime DNS/TLS/HTTP requirements are defined in
 [Exit capability and route approval](../architecture/EXIT-CAPABILITY.md).
 The two fields may use the same dual-stack URL; each probe resolves and dials
-only its requested address family.
+only its requested address family, and a failed family does not block the
+healthy family from receiving its Exit default.
 
 ## Reconciliation Runtime
 

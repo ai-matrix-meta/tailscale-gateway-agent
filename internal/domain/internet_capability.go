@@ -67,7 +67,12 @@ func (snapshot InternetCapabilitySnapshot) Validate() error {
 	return errors.Join(validationErrors...)
 }
 
-func (snapshot InternetCapabilitySnapshot) ExitAvailable(now time.Time, proxyLink LinkIdentity) bool {
-	return snapshot.Validate() == nil && proxyLink.Valid() && snapshot.ProxyLink == proxyLink &&
-		snapshot.IPv4.Fresh(now) && snapshot.IPv6.Fresh(now)
+func (snapshot InternetCapabilitySnapshot) AvailableExitDefaultRoutes(now time.Time, proxyLink LinkIdentity) ExitDefaultRouteSet {
+	if snapshot.Validate() != nil || !proxyLink.Valid() || snapshot.ProxyLink != proxyLink {
+		return ExitDefaultRouteSet{}
+	}
+	return ExitDefaultRouteSet{
+		IPv4: snapshot.IPv4.Fresh(now),
+		IPv6: snapshot.IPv6.Fresh(now),
+	}
 }

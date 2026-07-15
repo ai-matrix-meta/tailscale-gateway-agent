@@ -3,7 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
-	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/ai-matrix-meta/tailscale-gateway-agent/internal/domain"
@@ -13,14 +13,33 @@ type InternetCapabilityObserver interface {
 	Observe(context.Context, domain.LinkIdentity) (domain.InternetCapabilitySnapshot, error)
 }
 
-func internetCapabilityConditions(snapshot domain.InternetCapabilitySnapshot, proxyLink domain.LinkIdentity, now time.Time) ([]domain.ReconcileCondition, error) {
+type internetCapabilityEvaluation struct {
+	exitDefaults domain.ExitDefaultRouteSet
+	conditions   []domain.ReconcileCondition
+}
+
+type exitDefaultAdvertisementTransition struct {
+	advertisementsToPublish  domain.ExitDefaultRouteSet
+	advertisementsToWithdraw domain.ExitDefaultRouteSet
+}
+
+func (transition exitDefaultAdvertisementTransition) Empty() bool {
+	return transition.advertisementsToPublish.Empty() && transition.advertisementsToWithdraw.Empty()
+}
+
+func evaluateInternetCapability(snapshot domain.InternetCapabilitySnapshot, proxyLink domain.LinkIdentity, now time.Time) (internetCapabilityEvaluation, error) {
 	if err := snapshot.Validate(); err != nil {
-		return nil, fmt.Errorf("validate Internet capability observation: %w", err)
+		return internetCapabilityEvaluation{}, fmt.Errorf("validate Internet capability observation: %w", err)
 	}
 	if snapshot.ProxyLink != proxyLink {
-		return []domain.ReconcileCondition{{Kind: domain.ConditionInternetCapabilityLinkMismatch}}, nil
+		return internetCapabilityEvaluation{
+			conditions: []domain.ReconcileCondition{{Kind: domain.ConditionInternetCapabilityLinkMismatch}},
+		}, nil
 	}
-	conditions := make([]domain.ReconcileCondition, 0, 2)
+	evaluation := internetCapabilityEvaluation{
+		exitDefaults: snapshot.AvailableExitDefaultRoutes(now, proxyLink),
+		conditions:   make([]domain.ReconcileCondition, 0, 2),
+	}
 	for _, item := range []struct {
 		family     domain.AddressFamily
 		capability domain.InternetFamilyCapability
@@ -38,30 +57,66 @@ func internetCapabilityConditions(snapshot domain.InternetCapabilitySnapshot, pr
 			kind = domain.ConditionInternetCapabilityStale
 		}
 		if kind != "" {
-			conditions = append(conditions, domain.ReconcileCondition{Kind: kind, Family: item.family})
+			evaluation.conditions = append(evaluation.conditions, domain.ReconcileCondition{Kind: kind, Family: item.family})
 		}
 	}
-	return conditions, nil
+	return evaluation, nil
 }
 
-func isExactExitPreferenceReduction(current, desired domain.TailnetPreferences) bool {
-	if len(current.AdvertiseRoutes) != len(desired.AdvertiseRoutes)+2 {
+func classifyExitDefaultAdvertisementTransition(currentPreferences, targetPreferences domain.TailnetPreferences) (exitDefaultAdvertisementTransition, bool) {
+	if !slices.Equal(currentPreferences.RoutesWithoutExitDefaults(), targetPreferences.RoutesWithoutExitDefaults()) {
+		return exitDefaultAdvertisementTransition{}, false
+	}
+	currentExitDefaults := currentPreferences.ExitDefaultRoutes()
+	targetExitDefaults := targetPreferences.ExitDefaultRoutes()
+	transition := exitDefaultAdvertisementTransition{
+		advertisementsToPublish:  targetExitDefaults.Difference(currentExitDefaults),
+		advertisementsToWithdraw: currentExitDefaults.Difference(targetExitDefaults),
+	}
+	if transition.Empty() {
+		return exitDefaultAdvertisementTransition{}, false
+	}
+	return transition, true
+}
+
+func routingChangesMatchExitDefaultTransition(changes domain.RoutingChanges, network domain.NetworkConfiguration, transition exitDefaultAdvertisementTransition) bool {
+	if transition.Empty() || len(changes.AddRules) != 0 || len(changes.DeleteRules) != 0 {
 		return false
 	}
-	currentRoutes := make(map[netip.Prefix]struct{}, len(current.AdvertiseRoutes))
-	for _, prefix := range current.AdvertiseRoutes {
-		currentRoutes[prefix] = struct{}{}
-	}
-	for _, prefix := range desired.AdvertiseRoutes {
-		if _, exists := currentRoutes[prefix]; !exists {
+	for _, route := range changes.UpsertRoutes {
+		if !isExitDefaultRouteForPublication(route, network, transition.advertisementsToPublish) &&
+			!isRestoredExitDefaultBlackhole(route, network, transition.advertisementsToWithdraw) {
 			return false
 		}
-		delete(currentRoutes, prefix)
 	}
-	if len(currentRoutes) != 2 {
-		return false
+	for _, route := range changes.DeleteRoutes {
+		if !isWithdrawnExitDefaultRoute(route, network, transition.advertisementsToWithdraw) {
+			return false
+		}
 	}
-	_, hasIPv4Default := currentRoutes[domain.DefaultPrefix(domain.IPv4)]
-	_, hasIPv6Default := currentRoutes[domain.DefaultPrefix(domain.IPv6)]
-	return hasIPv4Default && hasIPv6Default
+	return len(changes.UpsertRoutes) != 0 || len(changes.DeleteRoutes) != 0
+}
+
+func isExitDefaultRouteForPublication(route domain.Route, network domain.NetworkConfiguration, advertisements domain.ExitDefaultRouteSet) bool {
+	return route.Table == network.ExitRouteTable &&
+		route.Disposition == domain.RouteUnicast &&
+		route.Metric == network.ActiveRouteMetric &&
+		advertisements.Contains(route.Family) &&
+		route.Prefix == domain.DefaultPrefix(route.Family)
+}
+
+func isRestoredExitDefaultBlackhole(route domain.Route, network domain.NetworkConfiguration, withdrawals domain.ExitDefaultRouteSet) bool {
+	return route.Table == network.ExitRouteTable &&
+		route.Disposition == domain.RouteBlackhole &&
+		route.Metric == network.FailClosedRouteMetric &&
+		withdrawals.Contains(route.Family) &&
+		route.Prefix == domain.DefaultPrefix(route.Family)
+}
+
+func isWithdrawnExitDefaultRoute(route domain.Route, network domain.NetworkConfiguration, withdrawals domain.ExitDefaultRouteSet) bool {
+	return route.Table == network.ExitRouteTable &&
+		route.Disposition == domain.RouteUnicast &&
+		route.Metric == network.ActiveRouteMetric &&
+		withdrawals.Contains(route.Family) &&
+		route.Prefix == domain.DefaultPrefix(route.Family)
 }

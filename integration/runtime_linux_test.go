@@ -85,10 +85,10 @@ func TestRunnerConvergesWithoutSelfEventsAndRepairsExternalDrift(t *testing.T) {
 	tailnet := &staticTailnetControl{state: domain.TailnetState{
 		Running: true, KernelTunnel: true,
 		SelfAddresses: []netip.Addr{netip.MustParseAddr("100.64.0.8"), netip.MustParseAddr("fd7a:115c:a1e0::8")},
-		Preferences:   domain.NewTailnetPreferences(nil, false),
+		Preferences:   domain.NewTailnetPreferences(nil, domain.ExitDefaultRouteSet{}),
 		Control: domain.TailnetControlObservation{
 			SelfPresent: true, InNetworkMap: true, Online: true, AllowedIPsAvailable: true,
-			ApprovedRoutes: domain.NewTailnetPreferences(configuration.Tailnet.AdvertiseRoutes, true).AdvertiseRoutes,
+			ApprovedRoutes: domain.NewTailnetPreferences(configuration.Tailnet.AdvertiseRoutes, domain.AllExitDefaultRoutes()).AdvertiseRoutes,
 			ObservedAt:     time.Now(),
 		},
 	}}
@@ -301,7 +301,7 @@ func (control *staticTailnetControl) ReadState(context.Context) (domain.TailnetS
 func (control *staticTailnetControl) WritePreferences(_ context.Context, preferences domain.TailnetPreferences) error {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
-	control.state.Preferences = domain.NewTailnetPreferences(preferences.AdvertiseRoutes, false)
+	control.state.Preferences = domain.NormalizeTailnetPreferences(preferences.AdvertiseRoutes)
 	return nil
 }
 

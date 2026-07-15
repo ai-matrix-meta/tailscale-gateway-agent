@@ -77,27 +77,30 @@ bootstrap deadlock and must not be treated as an external Tailnet outage.
 
 ## Exit Capability Degradation
 
-Exit advertisement requires fresh successful IPv4 and IPv6 probes through the
-currently discovered proxy TUN. Initial debounce, either family being
+Each Exit default requires a fresh successful probe for its own address family
+through the currently discovered proxy TUN. Initial debounce, a family being
 unavailable, an expired success, or a proxy-link replacement produces an
-operational condition: readiness becomes false and both Exit defaults are
-withdrawn, while configured subnet advertisements and ordinary Tailnet IPv6
-remain intact. These conditions do not restart the process or create a
-technical-error retry storm.
+operational condition: readiness becomes false and only the affected family
+default is withdrawn. Healthy-family defaults, configured subnet
+advertisements, and ordinary Tailnet IPv6 remain intact. These conditions do
+not restart the process or create a technical-error retry storm.
 
 Use the bounded `internet_capability_available`,
 `internet_capability_probe_total`, `internet_capability_snapshot_age_seconds`,
 and `condition_active` metric families to identify the affected address family
 and state. Probe URLs, resolved addresses, and raw responses are intentionally
-absent from metrics and logs. A recovery is not advertised until both families
-pass debounce and the Agent has repeated final routing, nftables, and kernel
-readback.
+absent from metrics and logs. A family recovery is not advertised until that
+family passes debounce and the Agent has repeated final routing, nftables, and
+kernel readback. Existing healthy-family advertisement is not withdrawn during
+this recovery.
 
 Endpoint values are cluster-owned production contracts. Do not substitute an
 unapproved public service during an incident. Confirm the approved endpoint's
-DNS family exclusivity, exact HTTPS 204 response, certificate chain, rate
-limit, and upstream SOCKS reachability outside the Agent before changing
-configuration.
+requested-family DNS behavior, exact HTTPS 204 response, certificate chain,
+rate limit, and upstream SOCKS reachability outside the Agent before changing
+configuration. A dual-stack endpoint is valid when each probe resolves only
+the requested family; DNS records do not need to be globally exclusive to one
+family.
 
 ## Kubernetes State And Credentials
 

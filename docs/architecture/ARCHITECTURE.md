@@ -104,10 +104,11 @@ Agent route protocol. A foreign object inside an owned identity is a conflict,
 not an invitation to delete it. Routes are installed before rules are enabled;
 rules are removed before obsolete routes.
 
-Exit advertisement additionally requires fresh IPv4 and IPv6 Internet
-capability through the discovered proxy TUN and control-plane approval of both
-default routes. Capability monitoring runs inside the existing Agent process;
-its detailed ownership, security, and transaction contracts are defined in
+Each Exit default additionally requires fresh Internet capability for its own
+address family through the discovered proxy TUN and control-plane approval of
+that default route. Capability monitoring runs inside the existing Agent
+process; its detailed ownership, security, and transaction contracts are
+defined in
 [Exit capability and route approval](EXIT-CAPABILITY.md).
 
 ## Packet Filter

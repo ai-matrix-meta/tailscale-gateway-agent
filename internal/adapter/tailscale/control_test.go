@@ -82,7 +82,7 @@ func TestReadStateRejectsInvalidApprovedRoutes(t *testing.T) {
 func TestWritePreferencesMasksOnlyAdvertiseRoutes(t *testing.T) {
 	client := &fakeLocalAPI{}
 	control := &Control{client: client}
-	preferences := domain.NewTailnetPreferences([]netip.Prefix{netip.MustParsePrefix("10.0.8.0/24")}, true)
+	preferences := domain.NewTailnetPreferences([]netip.Prefix{netip.MustParsePrefix("10.0.8.0/24")}, domain.AllExitDefaultRoutes())
 	client.editResponse = &ipn.Prefs{AdvertiseRoutes: preferences.AdvertiseRoutes}
 
 	if err := control.WritePreferences(context.Background(), preferences); err != nil {
@@ -101,7 +101,7 @@ func TestWritePreferencesMasksOnlyAdvertiseRoutes(t *testing.T) {
 
 func TestWritePreferencesRejectsNonConvergedResponse(t *testing.T) {
 	control := &Control{client: &fakeLocalAPI{editResponse: &ipn.Prefs{}}}
-	preferences := domain.NewTailnetPreferences([]netip.Prefix{netip.MustParsePrefix("10.0.8.0/24")}, false)
+	preferences := domain.NewTailnetPreferences([]netip.Prefix{netip.MustParsePrefix("10.0.8.0/24")}, domain.ExitDefaultRouteSet{})
 	if err := control.WritePreferences(context.Background(), preferences); err == nil {
 		t.Fatal("non-converged LocalAPI response was accepted")
 	}

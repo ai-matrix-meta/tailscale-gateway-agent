@@ -29,9 +29,10 @@ The implementation must establish three independent observations:
 3. Fresh IPv4 and IPv6 Internet capability through the discovered proxy TUN,
    sing-box, and the configured upstream SOCKS transport.
 
-The Agent may advertise the two Exit defaults only when all three observations
-allow it. Subnet advertisements and ordinary Tailnet IPv6 remain independent
-of Internet capability.
+The Agent derives each Exit default independently. A family-specific default is
+advertised only when local intent, approval for that exact prefix, and fresh
+capability for that address family all allow it. Subnet advertisements and
+ordinary Tailnet IPv6 remain independent of Internet capability.
 
 The Agent still does not handle application data-plane packets. It creates two
 small, bounded HTTPS control-plane requests. The kernel and sing-box carry
@@ -42,7 +43,8 @@ those requests over the same proxy TUN path used by Exit traffic.
 - Inferring `run` versus `supervise-containerboot` from the environment.
 - Inferring Internet capability from local addresses, DNS AAAA records, or
   internal routes.
-- Supporting a Tailscale-incompatible IPv4-only Exit Node.
+- Advertising an Exit default without fresh capability evidence for its address
+  family.
 - Selecting a public probe provider in source or default configuration.
 - Replacing the external Tailnet traffic matrix with an internal probe.
 - Moving Tailscale, sing-box, or Kubernetes lifecycle ownership into the
@@ -295,27 +297,41 @@ Every pass follows this order:
 1. Read and validate LocalAPI status and local preferences.
 2. Capture one resolver snapshot and discover the current network state.
 3. Observe Internet capability for the exact discovered proxy link.
-4. Build and plan routing and nftables state.
-5. Derive local advertisement intent:
+4. Derive local advertisement intent:
    - configured subnet prefixes are always retained;
-   - both Exit defaults are included only when both family snapshots are
-     available, fresh, initialized, and bound to the same proxy link.
-6. Converge and read back the data plane before increasing advertisement.
-7. Write the exact advertisement preference at most once when it differs.
-8. Read back preferences and current control-plane approval.
-9. Evaluate every desired subnet prefix and each desired Exit default against
+   - each Exit default is included only when its family snapshot is available,
+     fresh, initialized, and bound to the same proxy link.
+5. Build and plan routing and nftables state.
+6. Withdraw every no-longer-eligible Exit default before removing its active
+   route. A cross-family transition also withholds newly eligible defaults at
+   this stage.
+7. If the complete drift is limited to those Exit defaults and nftables already
+   matches, apply only the scoped route changes. Otherwise enter the normal
+   global quarantine transaction and clear all advertisements.
+8. Converge and read back routing, nftables, and kernel prerequisites.
+9. Publish the final desired preferences only after verification. A pure loss
+   or recovery requires one preference write; a direct cross-family transition
+   requires one withdrawal and one publication write.
+10. Read back preferences and current control-plane approval.
+11. Evaluate every desired subnet prefix and each desired Exit default against
    approved routes.
-10. Publish Ready only when no technical error, capability condition, approval
+12. Publish Ready only when no technical error, capability condition, approval
     condition, or newer event exists.
 
-Capability loss is a preference-reduction transaction. It changes an existing
-`subnets + 0.0.0.0/0 + ::/0` preference to `subnets` in one LocalAPI write and
-does not remove subnet configuration or disable ordinary IPv6. If that write
-or readback fails, the normal fail-closed path clears every advertisement.
+Capability loss is a family-scoped preference-reduction transaction. It
+withdraws only the unavailable family defaults, preserves healthy family
+defaults and configured subnet routes, and does not disable ordinary IPv6. The
+corresponding Exit-table active route is then replaced by its fail-closed
+blackhole and the complete routing, nftables, and kernel state is read back.
+If the change is limited to Exit defaults, the global forwarding gate is not
+rewritten; any unrelated drift or technical failure enters the normal
+fail-closed transaction.
 
-Capability recovery is an advertisement-increase transaction. The Agent first
-performs final routing, nftables, and kernel readback, then publishes both Exit
-defaults together. There is no intermediate IPv4-only or IPv6-only Exit state.
+Capability recovery is a family-scoped advertisement-increase transaction. The
+Agent installs and verifies only the newly eligible active default routes,
+performs final routing, nftables, and kernel readback, and then publishes the
+new defaults. An existing healthy family remains advertised throughout. No
+family default is published before its active route has converged.
 
 Explicit Admin Console rejection is observed after local intent converges. It
 does not alter local preferences, delete configuration, or trigger another
@@ -405,9 +421,10 @@ Unit and deterministic adapter tests must cover:
 - first observation, success/failure debounce, saturation, expiration,
   cancellation, and proxy-link replacement;
 - both healthy, IPv4-only, IPv6-only, both failed, and stale snapshots;
-- capability loss withdrawing both defaults while preserving subnet and
-  internal IPv6 routes;
-- recovery verifying the data plane before one dual-default preference write;
+- capability loss withdrawing only failed-family defaults while preserving
+  healthy-family, subnet, and internal IPv6 routes;
+- family-scoped recovery verifying the data plane before publishing newly
+  eligible defaults;
 - advertised and approved, explicitly unapproved, nil Self, missing netmap,
   offline control poll, nil AllowedIPs, HA standby, and separate Exit-default
   approval;
@@ -427,9 +444,10 @@ does not replace that matrix.
 ## Unresolved Production Input
 
 Production endpoint values are intentionally absent. Before P0-007 can close,
-operations must approve two HTTPS endpoints and record:
+operations must approve the IPv4 and IPv6 probe configuration and record:
 
-- exclusive A or AAAA behavior;
+- requested-family DNS behavior and rejection of mixed or reserved
+  destinations;
 - exact HTTP 204 and empty-body behavior;
 - endpoint operator and ownership;
 - certificate and trust-chain expectations;

@@ -77,7 +77,7 @@ func (control *Control) ReadState(ctx context.Context) (domain.TailnetState, err
 		Running:       status.BackendState == ipn.Running.String(),
 		KernelTunnel:  status.TUN,
 		SelfAddresses: slices.Clone(status.TailscaleIPs),
-		Preferences:   domain.NewTailnetPreferences(preferences.AdvertiseRoutes, false),
+		Preferences:   domain.NormalizeTailnetPreferences(preferences.AdvertiseRoutes),
 		Control:       controlObservation,
 	}, nil
 }
@@ -109,7 +109,7 @@ func approvedRoutes(allowed []netip.Prefix, selfAddresses []netip.Addr) ([]netip
 			approved = append(approved, prefix)
 		}
 	}
-	return domain.NewTailnetPreferences(approved, false).AdvertiseRoutes, nil
+	return domain.NormalizeTailnetPreferences(approved).AdvertiseRoutes, nil
 }
 
 func (control *Control) WritePreferences(ctx context.Context, preferences domain.TailnetPreferences) error {
@@ -132,7 +132,7 @@ func (control *Control) WritePreferences(ctx context.Context, preferences domain
 	if err := observed.Validate(); err != nil {
 		return fmt.Errorf("validate LocalAPI edit response: %w", err)
 	}
-	observed = domain.NewTailnetPreferences(observed.AdvertiseRoutes, false)
+	observed = domain.NormalizeTailnetPreferences(observed.AdvertiseRoutes)
 	if !observed.Equal(preferences) {
 		return fmt.Errorf("LocalAPI edit response did not converge: got %v, want %v", observed.AdvertiseRoutes, preferences.AdvertiseRoutes)
 	}

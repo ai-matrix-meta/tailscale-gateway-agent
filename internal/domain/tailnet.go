@@ -12,11 +12,60 @@ type TailnetPreferences struct {
 	AdvertiseRoutes []netip.Prefix
 }
 
-func NewTailnetPreferences(routes []netip.Prefix, advertiseExitNode bool) TailnetPreferences {
-	result := slices.Clone(routes)
-	if advertiseExitNode {
-		result = append(result, DefaultPrefix(IPv4), DefaultPrefix(IPv6))
+type ExitDefaultRouteSet struct {
+	IPv4 bool
+	IPv6 bool
+}
+
+func AllExitDefaultRoutes() ExitDefaultRouteSet {
+	return ExitDefaultRouteSet{IPv4: true, IPv6: true}
+}
+
+func (routes ExitDefaultRouteSet) Empty() bool {
+	return !routes.IPv4 && !routes.IPv6
+}
+
+func (routes ExitDefaultRouteSet) Equal(other ExitDefaultRouteSet) bool {
+	return routes.IPv4 == other.IPv4 && routes.IPv6 == other.IPv6
+}
+
+func (routes ExitDefaultRouteSet) Contains(family AddressFamily) bool {
+	switch family {
+	case IPv4:
+		return routes.IPv4
+	case IPv6:
+		return routes.IPv6
+	default:
+		return false
 	}
+}
+
+func (routes ExitDefaultRouteSet) Difference(other ExitDefaultRouteSet) ExitDefaultRouteSet {
+	return ExitDefaultRouteSet{
+		IPv4: routes.IPv4 && !other.IPv4,
+		IPv6: routes.IPv6 && !other.IPv6,
+	}
+}
+
+func (routes ExitDefaultRouteSet) Prefixes() []netip.Prefix {
+	result := make([]netip.Prefix, 0, 2)
+	if routes.IPv4 {
+		result = append(result, DefaultPrefix(IPv4))
+	}
+	if routes.IPv6 {
+		result = append(result, DefaultPrefix(IPv6))
+	}
+	return result
+}
+
+func NewTailnetPreferences(routes []netip.Prefix, exitDefaults ExitDefaultRouteSet) TailnetPreferences {
+	result := slices.Clone(routes)
+	result = append(result, exitDefaults.Prefixes()...)
+	return NormalizeTailnetPreferences(result)
+}
+
+func NormalizeTailnetPreferences(routes []netip.Prefix) TailnetPreferences {
+	result := slices.Clone(routes)
 	for index := range result {
 		result[index] = result[index].Masked()
 	}
@@ -27,6 +76,35 @@ func NewTailnetPreferences(routes []netip.Prefix, advertiseExitNode bool) Tailne
 		return left.Bits() - right.Bits()
 	})
 	return TailnetPreferences{AdvertiseRoutes: slices.Compact(result)}
+}
+
+func (preferences TailnetPreferences) ExitDefaultRoutes() ExitDefaultRouteSet {
+	result := ExitDefaultRouteSet{}
+	for _, prefix := range preferences.AdvertiseRoutes {
+		switch prefix {
+		case DefaultPrefix(IPv4):
+			result.IPv4 = true
+		case DefaultPrefix(IPv6):
+			result.IPv6 = true
+		}
+	}
+	return result
+}
+
+func (preferences TailnetPreferences) RoutesWithoutExitDefaults() []netip.Prefix {
+	result := make([]netip.Prefix, 0, len(preferences.AdvertiseRoutes))
+	for _, prefix := range preferences.AdvertiseRoutes {
+		if prefix == DefaultPrefix(FamilyOfPrefix(prefix)) {
+			continue
+		}
+		result = append(result, prefix)
+	}
+	return result
+}
+
+func (preferences TailnetPreferences) WithoutExitDefaults(exitDefaults ExitDefaultRouteSet) TailnetPreferences {
+	retainedExitDefaults := preferences.ExitDefaultRoutes().Difference(exitDefaults)
+	return NewTailnetPreferences(preferences.RoutesWithoutExitDefaults(), retainedExitDefaults)
 }
 
 func (preferences TailnetPreferences) Equal(other TailnetPreferences) bool {

@@ -58,13 +58,15 @@ func buildPreparedRouting(configuration domain.Configuration, proxyTunnelLink do
 	return state
 }
 
-func buildDesiredRouting(configuration domain.Configuration, snapshot domain.NetworkSnapshot) domain.RoutingState {
+func buildDesiredRouting(configuration domain.Configuration, snapshot domain.NetworkSnapshot, activeExitDefaults domain.ExitDefaultRouteSet) domain.RoutingState {
 	network := configuration.Network
 	state := buildPreparedRouting(configuration, snapshot.ProxyTunnelLink)
 	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
-		state.Routes = append(state.Routes,
-			activeRoute(network, family, network.ExitRouteTable, domain.DefaultPrefix(family), netip.Addr{}, snapshot.ProxyTunnelLink, false),
-		)
+		if activeExitDefaults.Contains(family) {
+			state.Routes = append(state.Routes,
+				activeRoute(network, family, network.ExitRouteTable, domain.DefaultPrefix(family), netip.Addr{}, snapshot.ProxyTunnelLink, false),
+			)
+		}
 		state.Rules = append(state.Rules,
 			domain.Rule{Family: family, Priority: network.ExitRulePriority, Table: network.ExitRouteTable, IncomingInterface: snapshot.TailnetLink.Name},
 		)

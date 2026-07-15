@@ -115,7 +115,7 @@ func (controller *Controller) Prepare(ctx context.Context) error {
 
 func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileReport, error) {
 	report := domain.ReconcileReport{}
-	disabledPreferences := domain.NewTailnetPreferences(nil, false)
+	disabledPreferences := domain.NewTailnetPreferences(nil, domain.ExitDefaultRouteSet{})
 	if err := controller.dependencies.Kernel.Check(ctx); err != nil {
 		return report, fmt.Errorf("verify kernel prerequisites: %w", err)
 	}
@@ -172,30 +172,34 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 	}
 	controller.lastTailnetLink = snapshot.TailnetLink
 
-	desiredRouting := buildDesiredRouting(controller.configuration, snapshot)
-	desiredPolicy := controller.packetFilterPolicy(snapshot, localEgressAddresses, false)
-	advertiseExit := false
+	exitDefaults := domain.ExitDefaultRouteSet{}
 	if controller.configuration.Tailnet.AdvertiseExitNode {
 		capabilitySnapshot, capabilityErr := controller.dependencies.InternetCapability.Observe(ctx, snapshot.ProxyTunnelLink)
 		if capabilityErr != nil {
 			return report, fmt.Errorf("observe Internet capability: %w", capabilityErr)
 		}
-		conditions, conditionErr := internetCapabilityConditions(capabilitySnapshot, snapshot.ProxyTunnelLink, controller.now())
-		if conditionErr != nil {
-			return report, conditionErr
+		evaluation, evaluationErr := evaluateInternetCapability(capabilitySnapshot, snapshot.ProxyTunnelLink, controller.now())
+		if evaluationErr != nil {
+			return report, evaluationErr
 		}
-		report.Conditions = append(report.Conditions, conditions...)
-		advertiseExit = len(conditions) == 0
+		report.Conditions = append(report.Conditions, evaluation.conditions...)
+		exitDefaults = evaluation.exitDefaults
 	}
-	desiredPreferences := domain.NewTailnetPreferences(controller.configuration.Tailnet.AdvertiseRoutes, advertiseExit)
-	if isExactExitPreferenceReduction(tailnetState.Preferences, desiredPreferences) {
-		verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
-		if writeErr != nil {
-			return report, fmt.Errorf("withdraw Exit advertisements after capability loss: %w", writeErr)
+	desiredRouting := buildDesiredRouting(controller.configuration, snapshot, exitDefaults)
+	desiredPolicy := controller.packetFilterPolicy(snapshot, localEgressAddresses, false)
+	desiredPreferences := domain.NewTailnetPreferences(controller.configuration.Tailnet.AdvertiseRoutes, exitDefaults)
+	exitDefaultTransition, onlyExitDefaultsChanged := classifyExitDefaultAdvertisementTransition(tailnetState.Preferences, desiredPreferences)
+	if onlyExitDefaultsChanged && !exitDefaultTransition.advertisementsToWithdraw.Empty() {
+		preConvergencePreferences := desiredPreferences.WithoutExitDefaults(exitDefaultTransition.advertisementsToPublish)
+		if !tailnetState.Preferences.Equal(preConvergencePreferences) {
+			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, preConvergencePreferences)
+			if writeErr != nil {
+				return report, fmt.Errorf("withdraw unavailable Exit default advertisements: %w", writeErr)
+			}
+			report.TailnetWrites++
+			report.Changed = true
+			tailnetState = verifiedState
 		}
-		report.TailnetWrites++
-		report.Changed = true
-		tailnetState = verifiedState
 	}
 	routingChanges, err := controller.planRouting(ctx, desiredRouting)
 	if err != nil {
@@ -216,6 +220,37 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
 			if writeErr != nil {
 				return report, fmt.Errorf("publish Tailscale advertisements after final data-plane verification: %w", writeErr)
+			}
+			report.TailnetWrites++
+			report.Changed = true
+			tailnetState = verifiedState
+		}
+		controller.lastPacketPolicy = desiredPolicy
+		controller.hasPacketPolicy = true
+		controller.quarantined = false
+		controller.recordRouteApprovals(&report, tailnetState, desiredPreferences)
+		return report, nil
+	}
+	isolatedExitDefaultTransition := onlyExitDefaultsChanged &&
+		packetFilterObservation.Matches(desiredPolicy) &&
+		routingChangesMatchExitDefaultTransition(routingChanges, controller.configuration.Network, exitDefaultTransition)
+	if isolatedExitDefaultTransition {
+		routingWrites, applyErr := controller.applyRoutingPlan(ctx, desiredRouting, routingChanges)
+		report.RoutingWrites += routingWrites
+		report.Changed = report.Changed || routingWrites > 0
+		if applyErr != nil {
+			return report, applyErr
+		}
+		if err := controller.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
+			return report, err
+		}
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		if !tailnetState.Preferences.Equal(desiredPreferences) {
+			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
+			if writeErr != nil {
+				return report, fmt.Errorf("publish available Exit default advertisements: %w", writeErr)
 			}
 			report.TailnetWrites++
 			report.Changed = true
@@ -370,7 +405,7 @@ func (controller *Controller) failClosed(ctx context.Context, retainLocalControl
 	tailnetState, readErr := controller.readTailnetState(ctx)
 	var preferenceErr error
 	if readErr == nil {
-		disabled := domain.NewTailnetPreferences(nil, false)
+		disabled := domain.NewTailnetPreferences(nil, domain.ExitDefaultRouteSet{})
 		if !tailnetState.Preferences.Equal(disabled) {
 			_, preferenceErr = controller.writeAndVerifyTailnetPreferences(ctx, disabled)
 			if preferenceErr == nil {
@@ -645,7 +680,7 @@ func (controller *Controller) readTailnetState(ctx context.Context) (domain.Tail
 			return domain.TailnetState{}, fmt.Errorf("tailscale approved routes still contain self address %s", prefix)
 		}
 	}
-	state.Control.ApprovedRoutes = domain.NewTailnetPreferences(state.Control.ApprovedRoutes, false).AdvertiseRoutes
+	state.Control.ApprovedRoutes = domain.NormalizeTailnetPreferences(state.Control.ApprovedRoutes).AdvertiseRoutes
 	return state, nil
 }
 

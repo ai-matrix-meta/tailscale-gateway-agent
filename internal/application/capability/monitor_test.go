@@ -36,7 +36,7 @@ func TestMonitorDebouncesBothFamiliesAndSkipsEarlyCycles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !second.ExitAvailable(now, link) {
+	if !second.AvailableExitDefaultRoutes(now, link).Equal(domain.AllExitDefaultRoutes()) {
 		t.Fatalf("second dual-stack success did not satisfy debounce: %#v", second)
 	}
 }

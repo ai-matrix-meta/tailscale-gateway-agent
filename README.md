@@ -22,8 +22,9 @@ Selected local control traffic -> packet mark -> local-egress policy table
 Clients that do not select this node as an exit node retain normal Tailnet and
 advertised-subnet behavior. The Agent publishes subnet advertisements only
 after routing and packet-filter state has converged and has been read back
-successfully. Both Exit defaults additionally require fresh IPv4 and IPv6
-Internet capability through the discovered proxy TUN.
+successfully. Each Exit default additionally requires fresh Internet
+capability for its own address family through the discovered proxy TUN; an
+unhealthy family does not suppress a healthy family's Exit default.
 
 ## Runtime Requirements
 
@@ -98,9 +99,14 @@ extra arguments are rejected, so containerboot cannot share the Agent's
   from escaping the configured proxy path.
 - The Agent owns only the low 16 packet-mark bits. Marking preserves Tailscale's
   upper mark bytes, and policy rules match the same low-bit mask.
-- Any detected drift is handled as one ordered transaction: close forwarding,
-  clear advertisements, converge and verify routing, converge and verify
-  nftables, reopen forwarding, verify again, then republish advertisements.
+- A capability transition limited to Exit defaults is handled per address
+  family: withdraw unavailable defaults, converge only their routing changes,
+  verify the complete data plane, then publish newly eligible defaults. The
+  healthy family and global forwarding gate remain unchanged.
+- Any other detected drift is handled as one ordered transaction: close
+  forwarding, clear advertisements, converge and verify routing, converge and
+  verify nftables, reopen forwarding, verify again, then republish
+  advertisements.
 - A live technical failure always closes forwarding, blackholes Exit selectors,
   and clears advertisements. It retains the bounded local-control path only
   after revalidating DNS freshness, the proxy TUN, packet marking, routing

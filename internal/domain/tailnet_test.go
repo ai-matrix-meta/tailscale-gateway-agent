@@ -2,9 +2,30 @@ package domain
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 )
+
+func TestTailnetPreferencesExposeAndRemoveExitDefaultsWithoutChangingOtherRoutes(t *testing.T) {
+	routes := []netip.Prefix{
+		netip.MustParsePrefix("10.0.8.0/24"),
+		netip.MustParsePrefix("fd00:8::/64"),
+	}
+	preferences := NewTailnetPreferences(routes, AllExitDefaultRoutes())
+	if got := preferences.ExitDefaultRoutes(); !got.Equal(AllExitDefaultRoutes()) {
+		t.Fatalf("exit default routes = %#v, want both families", got)
+	}
+	if got := preferences.RoutesWithoutExitDefaults(); !slices.Equal(got, routes) {
+		t.Fatalf("non-Exit routes = %v, want %v", got, routes)
+	}
+
+	retained := preferences.WithoutExitDefaults(ExitDefaultRouteSet{IPv6: true})
+	want := NewTailnetPreferences(routes, ExitDefaultRouteSet{IPv4: true})
+	if !retained.Equal(want) {
+		t.Fatalf("removing IPv6 Exit default changed unrelated preferences: got %v, want %v", retained.AdvertiseRoutes, want.AdvertiseRoutes)
+	}
+}
 
 func TestTailnetControlObservationAcceptsExplicitAvailableState(t *testing.T) {
 	observation := TailnetControlObservation{
