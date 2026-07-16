@@ -149,6 +149,12 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 	if !slices.Contains(startup.report.Conditions, domain.ReconcileCondition{Kind: domain.ConditionInternetCapabilityUnavailable, Family: domain.IPv6}) {
 		t.Fatalf("IPv4-only startup omitted the IPv6 capability condition: %#v", startup.report)
 	}
+	if !startup.report.DataPlaneAvailable {
+		t.Fatalf("IPv4-only startup did not report an available data plane: %#v", startup.report)
+	}
+	if snapshot := status.HealthSnapshot(); !snapshot.Ready || !snapshot.DataPlaneAvailable || snapshot.Phase != domain.RuntimeDegraded {
+		t.Fatalf("IPv4-only startup health is inconsistent: %#v", snapshot)
+	}
 	assertAtomicExitNodePreferences(t, tailnet, configuration)
 	assertManagedExitDefaultRouting(t, network, configuration, domain.ExitDefaultRouteSet{IPv4: true})
 	time.Sleep(2 * configuration.Runtime.EventDebounce)
@@ -156,30 +162,60 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 		t.Fatalf("managed writes leaked self-generated network events: %#v", records)
 	}
 
+	tailnet.setApprovedRoutes([]netip.Prefix{domain.DefaultPrefix(domain.IPv4), domain.DefaultPrefix(domain.IPv6)})
+	addDummy(t, "runtime-approval-off", nil)
+	approvalDisabledRecords := metrics.waitForRecord(t, 2, 15*time.Second)
+	approvalDisabled := approvalDisabledRecords[1]
+	wantApprovalCondition := domain.ReconcileCondition{
+		Kind: domain.ConditionRouteNotApproved, Family: domain.IPv4, Prefix: advertisedPrefix,
+	}
+	if approvalDisabled.err != nil || approvalDisabled.report.Changed || !approvalDisabled.report.DataPlaneAvailable ||
+		approvalDisabled.report.RoutingWrites != 0 || approvalDisabled.report.PacketFilterWrites != 0 || approvalDisabled.report.TailnetWrites != 0 ||
+		!slices.Contains(approvalDisabled.report.Conditions, wantApprovalCondition) {
+		t.Fatalf("disabled subnet approval changed the serving data plane: %#v", approvalDisabled)
+	}
+	if snapshot := status.HealthSnapshot(); !snapshot.Ready || !snapshot.DataPlaneAvailable || snapshot.Phase != domain.RuntimeDegraded ||
+		!slices.Contains(snapshot.Conditions, wantApprovalCondition) {
+		t.Fatalf("disabled subnet approval produced wrong health state: %#v", snapshot)
+	}
+
+	tailnet.setApprovedRoutes(domain.NewTailnetExitNodePreferences(configuration.Tailnet.AdvertiseRoutes).AdvertiseRoutes)
+	addDummy(t, "runtime-approval-on", nil)
+	approvalRestoredRecords := metrics.waitForRecord(t, 3, 15*time.Second)
+	approvalRestored := approvalRestoredRecords[2]
+	if approvalRestored.err != nil || approvalRestored.report.Changed || !approvalRestored.report.DataPlaneAvailable ||
+		approvalRestored.report.RoutingWrites != 0 || approvalRestored.report.PacketFilterWrites != 0 || approvalRestored.report.TailnetWrites != 0 ||
+		slices.Contains(approvalRestored.report.Conditions, wantApprovalCondition) {
+		t.Fatalf("restored subnet approval changed managed state: %#v", approvalRestored)
+	}
+
 	internetCapability.setActiveExitDefaultRoutes(domain.ExitDefaultRouteSet{IPv6: true})
 	addDummy(t, "runtime-cap-v6", nil)
-	transitionRecords := metrics.waitForRecord(t, 2, 15*time.Second)
-	transition := transitionRecords[1]
+	transitionRecords := metrics.waitForRecord(t, 4, 15*time.Second)
+	transition := transitionRecords[3]
 	if transition.err != nil || transition.report.RoutingWrites == 0 || transition.report.PacketFilterWrites != 0 || transition.report.TailnetWrites != 0 {
 		t.Fatalf("IPv4-to-IPv6 capability transition was not routing-scoped: %#v", transition)
 	}
 	if !slices.Contains(transition.report.Conditions, domain.ReconcileCondition{Kind: domain.ConditionInternetCapabilityUnavailable, Family: domain.IPv4}) {
 		t.Fatalf("IPv6-only transition omitted the IPv4 capability condition: %#v", transition.report)
 	}
+	if !transition.report.DataPlaneAvailable {
+		t.Fatalf("IPv6-only transition did not preserve data-plane availability: %#v", transition.report)
+	}
 	assertAtomicExitNodePreferences(t, tailnet, configuration)
 	assertManagedExitDefaultRouting(t, network, configuration, domain.ExitDefaultRouteSet{IPv6: true})
 
 	internetCapability.setActiveExitDefaultRoutes(domain.AllExitDefaultRoutes())
 	addDummy(t, "runtime-cap-all", nil)
-	recoveryRecords := metrics.waitForRecord(t, 3, 15*time.Second)
-	recovery := recoveryRecords[2]
+	recoveryRecords := metrics.waitForRecord(t, 5, 15*time.Second)
+	recovery := recoveryRecords[4]
 	if recovery.err != nil || recovery.report.RoutingWrites == 0 || recovery.report.PacketFilterWrites != 0 || recovery.report.TailnetWrites != 0 || len(recovery.report.Conditions) != 0 {
 		t.Fatalf("dual-family capability recovery was not routing-scoped: %#v", recovery)
 	}
 	assertAtomicExitNodePreferences(t, tailnet, configuration)
 	assertManagedExitDefaultRouting(t, network, configuration, domain.AllExitDefaultRoutes())
 	time.Sleep(2 * configuration.Runtime.EventDebounce)
-	if records := metrics.snapshot(); len(records) != 3 {
+	if records := metrics.snapshot(); len(records) != 5 {
 		t.Fatalf("capability route writes leaked self-generated network events: %#v", records)
 	}
 
@@ -187,17 +223,17 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 	if err := vnetlink.RouteDel(&deleted); err != nil {
 		t.Fatalf("delete managed route externally: %v", err)
 	}
-	repairRecords := metrics.waitForRecord(t, 4, 15*time.Second)
-	repair := repairRecords[3]
+	repairRecords := metrics.waitForRecord(t, 6, 15*time.Second)
+	repair := repairRecords[5]
 	if repair.err != nil || repair.report.RoutingWrites == 0 {
 		t.Fatalf("external route deletion was not repaired: %#v", repair)
 	}
 	_ = findManagedIPv4Default(t)
 
 	addDummy(t, "runtime-noise", nil)
-	steadyRecords := metrics.waitForRecord(t, 5, 15*time.Second)
-	steady := steadyRecords[4]
-	if steady.err != nil || steady.report.Changed || steady.report.RoutingWrites != 0 || steady.report.PacketFilterWrites != 0 || steady.report.TailnetWrites != 0 {
+	steadyRecords := metrics.waitForRecord(t, 7, 15*time.Second)
+	steady := steadyRecords[6]
+	if steady.err != nil || steady.report.Changed || !steady.report.DataPlaneAvailable || steady.report.RoutingWrites != 0 || steady.report.PacketFilterWrites != 0 || steady.report.TailnetWrites != 0 {
 		t.Fatalf("no-drift event reconciliation performed writes: %#v", steady)
 	}
 }
@@ -411,6 +447,12 @@ func (control *staticTailnetControl) preferences() domain.TailnetPreferences {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	return domain.TailnetPreferences{AdvertiseRoutes: slices.Clone(control.state.Preferences.AdvertiseRoutes)}
+}
+
+func (control *staticTailnetControl) setApprovedRoutes(routes []netip.Prefix) {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	control.state.Control.ApprovedRoutes = slices.Clone(routes)
 }
 
 func (*staticTailnetControl) Subscribe(ctx context.Context) (<-chan domain.TailnetEvent, <-chan error, error) {

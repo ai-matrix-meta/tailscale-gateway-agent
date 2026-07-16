@@ -109,9 +109,10 @@ its own address family through the discovered proxy TUN. Tailscale clients
 recognize an Exit Node only when both defaults are advertised, so the Tailnet
 preference pair is published atomically whenever at least one family is active;
 an unavailable family retains only its blackhole fallback. Approval observation
-covers both defaults and degrades readiness without rewriting unchanged
-preferences. Capability monitoring runs inside the existing Agent process; its
-detailed ownership, security, and transaction contracts are defined in
+covers both defaults and degrades operational phase without rewriting unchanged
+preferences or removing a verified data plane from readiness. Capability
+monitoring runs inside the existing Agent process; its detailed ownership,
+security, and transaction contracts are defined in
 [Exit capability and route approval](EXIT-CAPABILITY.md).
 
 ## Packet Filter
@@ -151,6 +152,14 @@ schedules fresh discovery; the Runner then enforces fail-closed state before
 retrying. A monotonically increasing dirty epoch closes the registration race
 between an event and the active cancellation function.
 
+Runtime phase and Kubernetes readiness are independent outputs. `Degraded`
+means one or more bounded operational conditions require attention; it does not
+mean traffic must be removed. A Degraded instance remains Ready when the latest
+current reconciliation verified an available data plane. Technical errors,
+stale or superseded verification, shutdown, quarantine, and total configured
+data-plane loss remain not Ready. Routine audits do not flap readiness while
+the previously verified epoch remains current.
+
 Startup order:
 
 1. Parse and validate all static configuration.
@@ -169,7 +178,9 @@ Startup order:
 11. Reconcile and read back routing and nftables.
 12. Open the forwarding gate and perform a final data-plane readback.
 13. Publish and read back the exact Tailnet preferences.
-14. Mark readiness true only if no newer event exists.
+14. Report whether the verified data plane can serve at least one configured
+    traffic path, then mark readiness true only if that result is current and
+    fresh. Publish operational conditions independently.
 
 The first full LocalAPI observation can race tailscaled's initial Self/netmap.
 A live failure pass therefore preserves the prepared local-control path only

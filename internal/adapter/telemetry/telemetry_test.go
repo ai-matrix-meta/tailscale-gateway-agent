@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,7 +18,7 @@ import (
 )
 
 func TestReadinessEndpointUsesApplicationStatus(t *testing.T) {
-	status := &fakeStatus{}
+	status := &fakeStatus{snapshot: domain.HealthSnapshot{Live: true, Phase: domain.RuntimeStarting}}
 	telemetry, err := New("127.0.0.1:0", status, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -29,12 +31,62 @@ func TestReadinessEndpointUsesApplicationStatus(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unexpected initial status: %d", response.Code)
 	}
+	var initial readinessStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &initial); err != nil {
+		t.Fatalf("decode initial readiness response: %v", err)
+	}
+	if initial.SchemaVersion != 1 || initial.Code != "starting" || initial.Ready || initial.DataPlaneAvailable {
+		t.Fatalf("unexpected initial readiness payload: %#v", initial)
+	}
 
-	status.ready = true
+	condition := domain.ReconcileCondition{
+		Kind: domain.ConditionRouteNotApproved, Family: domain.IPv4, Prefix: netip.MustParsePrefix("10.0.8.0/24"),
+	}
+	status.snapshot = domain.HealthSnapshot{
+		Live: true, Ready: true, DataPlaneAvailable: true, Phase: domain.RuntimeDegraded,
+		Conditions: []domain.ReconcileCondition{condition},
+	}
 	response = httptest.NewRecorder()
 	telemetry.handler().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("unexpected ready status: %d", response.Code)
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/json; charset=utf-8" {
+		t.Fatalf("unexpected readiness content type: %q", contentType)
+	}
+	var degraded readinessStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &degraded); err != nil {
+		t.Fatalf("decode degraded readiness response: %v", err)
+	}
+	if degraded.Code != "ready_degraded" || !degraded.Ready || !degraded.DataPlaneAvailable || degraded.Phase != domain.RuntimeDegraded ||
+		!slices.Equal(degraded.Conditions, []readinessCondition{{Code: condition.Kind, Family: "ipv4", Prefix: condition.Prefix.String()}}) {
+		t.Fatalf("unexpected degraded readiness payload: %#v", degraded)
+	}
+}
+
+func TestReadinessStatusCodeIsBoundedAndDeterministic(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot domain.HealthSnapshot
+		want     readinessCode
+	}{
+		{name: "ready", snapshot: domain.HealthSnapshot{Live: true, Ready: true, DataPlaneAvailable: true, Phase: domain.RuntimeReady}, want: readinessCodeReady},
+		{name: "ready degraded", snapshot: domain.HealthSnapshot{Live: true, Ready: true, DataPlaneAvailable: true, Phase: domain.RuntimeDegraded, Conditions: []domain.ReconcileCondition{{Kind: domain.ConditionInternetCapabilityUnavailable, Family: domain.IPv6}}}, want: readinessCodeReadyDegraded},
+		{name: "not live", snapshot: domain.HealthSnapshot{}, want: readinessCodeNotLive},
+		{name: "technical failure", snapshot: domain.HealthSnapshot{Live: true, Phase: domain.RuntimeDegraded, LastError: "technical detail"}, want: readinessCodeReconciliationFailed},
+		{name: "starting", snapshot: domain.HealthSnapshot{Live: true, Phase: domain.RuntimeStarting}, want: readinessCode(domain.RuntimeStarting)},
+		{name: "quarantined", snapshot: domain.HealthSnapshot{Live: true, Phase: domain.RuntimeQuarantined}, want: readinessCode(domain.RuntimeQuarantined)},
+		{name: "reconciling", snapshot: domain.HealthSnapshot{Live: true, Phase: domain.RuntimeReconciling}, want: readinessCode(domain.RuntimeReconciling)},
+		{name: "stopping", snapshot: domain.HealthSnapshot{Live: true, Phase: domain.RuntimeStopping}, want: readinessCode(domain.RuntimeStopping)},
+		{name: "data plane unavailable", snapshot: domain.HealthSnapshot{Live: true, Phase: domain.RuntimeDegraded}, want: readinessCodeDataPlaneUnavailable},
+		{name: "stale", snapshot: domain.HealthSnapshot{Live: true, DataPlaneAvailable: true, Phase: domain.RuntimeReady}, want: readinessCodeStale},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := readinessStatusCode(test.snapshot); got != test.want {
+				t.Fatalf("readiness code = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -74,7 +126,8 @@ func TestRouteApprovalMetricsAreBoundedAndRemoveStaleSeries(t *testing.T) {
 	approvedPrefix := netip.MustParsePrefix("10.0.8.0/24")
 	unapprovedPrefix := netip.MustParsePrefix("::/0")
 	report := domain.ReconcileReport{
-		ApprovalObserved: true,
+		DataPlaneAvailable: true,
+		ApprovalObserved:   true,
 		RouteApprovals: []domain.RouteApproval{
 			{Prefix: approvedPrefix, Approved: true},
 			{Prefix: unapprovedPrefix, Approved: false},
@@ -84,6 +137,9 @@ func TestRouteApprovalMetricsAreBoundedAndRemoveStaleSeries(t *testing.T) {
 		}},
 	}
 	telemetry.RecordReconcile("test", time.Millisecond, report, nil)
+	if got := gatheredMetricValues(t, telemetry, "tailscale_gateway_agent_data_plane_available")[""]; got != 1 {
+		t.Fatalf("data-plane availability gauge = %v, want 1", got)
+	}
 
 	if got := gatheredMetricValues(t, telemetry, "tailscale_gateway_agent_route_approval_observation_available")[""]; got != 1 {
 		t.Fatalf("approval observation gauge = %v, want 1", got)
@@ -99,7 +155,10 @@ func TestRouteApprovalMetricsAreBoundedAndRemoveStaleSeries(t *testing.T) {
 		t.Fatalf("route condition gauge = %v, want 1", got)
 	}
 
-	telemetry.RecordReconcile("test", time.Millisecond, domain.ReconcileReport{}, nil)
+	telemetry.RecordReconcile("test", time.Millisecond, domain.ReconcileReport{}, errors.New("test reconciliation failure"))
+	if got := gatheredMetricValues(t, telemetry, "tailscale_gateway_agent_data_plane_available")[""]; got != 0 {
+		t.Fatalf("failed reconciliation left data-plane availability set: %v", got)
+	}
 	if got := gatheredMetricValues(t, telemetry, "tailscale_gateway_agent_route_approval_observation_available")[""]; got != 0 {
 		t.Fatalf("unavailable approval observation gauge = %v, want 0", got)
 	}
@@ -170,8 +229,8 @@ func gatheredMetricValues(t *testing.T, telemetry *Telemetry, metricName string)
 	return values
 }
 
-type fakeStatus struct{ ready bool }
+type fakeStatus struct{ snapshot domain.HealthSnapshot }
 
 func (f *fakeStatus) HealthSnapshot() domain.HealthSnapshot {
-	return domain.HealthSnapshot{Live: true, Ready: f.ready}
+	return f.snapshot
 }

@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ type Telemetry struct {
 	writes              *prometheus.CounterVec
 	drift               *prometheus.CounterVec
 	ready               prometheus.Gauge
+	dataPlaneAvailable  prometheus.Gauge
 	conditions          *prometheus.GaugeVec
 	routeApproved       *prometheus.GaugeVec
 	approvalReady       prometheus.Gauge
@@ -61,7 +63,10 @@ func New(listenAddress string, status port.StatusProvider, logger *slog.Logger) 
 			Namespace: "tailscale_gateway_agent", Name: "drift_total", Help: "Total reconciliations that observed drift.",
 		}, []string{"trigger"}),
 		ready: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: "tailscale_gateway_agent", Name: "ready", Help: "Whether the last reconciliation is recent and successful.",
+			Namespace: "tailscale_gateway_agent", Name: "ready", Help: "Whether Kubernetes readiness is currently true.",
+		}),
+		dataPlaneAvailable: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "tailscale_gateway_agent", Name: "data_plane_available", Help: "Whether the latest completed reconciliation verified a traffic-serving data plane.",
 		}),
 		conditions: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "tailscale_gateway_agent", Name: "condition_active", Help: "Whether a bounded operational condition is active.",
@@ -85,7 +90,7 @@ func New(listenAddress string, status port.StatusProvider, logger *slog.Logger) 
 	if err := telemetry.registry.Register(telemetry.reconciles); err != nil {
 		return nil, err
 	}
-	for _, collector := range []prometheus.Collector{telemetry.duration, telemetry.writes, telemetry.drift, telemetry.ready, telemetry.conditions, telemetry.routeApproved, telemetry.approvalReady, telemetry.capabilityAvailable, telemetry.capabilityProbe, telemetry.capabilityAge, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})} {
+	for _, collector := range []prometheus.Collector{telemetry.duration, telemetry.writes, telemetry.drift, telemetry.ready, telemetry.dataPlaneAvailable, telemetry.conditions, telemetry.routeApproved, telemetry.approvalReady, telemetry.capabilityAvailable, telemetry.capabilityProbe, telemetry.capabilityAge, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})} {
 		if err := telemetry.registry.Register(collector); err != nil {
 			return nil, err
 		}
@@ -121,6 +126,11 @@ func (t *Telemetry) RecordReconcile(trigger string, duration time.Duration, repo
 	if report.Changed {
 		t.drift.WithLabelValues(trigger).Inc()
 	}
+	dataPlaneAvailable := float64(0)
+	if reconcileErr == nil && report.DataPlaneAvailable {
+		dataPlaneAvailable = 1
+	}
+	t.dataPlaneAvailable.Set(dataPlaneAvailable)
 	t.conditions.Reset()
 	for _, condition := range report.Conditions {
 		prefix := ""
@@ -241,11 +251,12 @@ func (t *Telemetry) handler() http.Handler {
 		writeStatus(writer, http.StatusOK, "ok\n")
 	})))
 	mux.Handle("/readyz", getOnly(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		if !t.status.HealthSnapshot().Ready {
-			writeStatus(writer, http.StatusServiceUnavailable, "not ready\n")
-			return
+		snapshot := t.status.HealthSnapshot()
+		statusCode := http.StatusOK
+		if !snapshot.Ready {
+			statusCode = http.StatusServiceUnavailable
 		}
-		writeStatus(writer, http.StatusOK, "ok\n")
+		writeReadinessStatus(writer, statusCode, snapshot)
 	})))
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
@@ -269,4 +280,78 @@ func writeStatus(writer http.ResponseWriter, status int, body string) {
 	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	writer.WriteHeader(status)
 	_, _ = writer.Write([]byte(body))
+}
+
+type readinessStatus struct {
+	SchemaVersion      int                  `json:"schemaVersion"`
+	Code               readinessCode        `json:"code"`
+	Ready              bool                 `json:"ready"`
+	Phase              domain.RuntimePhase  `json:"phase"`
+	DataPlaneAvailable bool                 `json:"dataPlaneAvailable"`
+	Conditions         []readinessCondition `json:"conditions"`
+}
+
+type readinessCondition struct {
+	Code   domain.ReconcileConditionKind `json:"code"`
+	Family string                        `json:"family,omitempty"`
+	Prefix string                        `json:"prefix,omitempty"`
+}
+
+type readinessCode string
+
+const (
+	readinessCodeReady                readinessCode = "ready"
+	readinessCodeReadyDegraded        readinessCode = "ready_degraded"
+	readinessCodeNotLive              readinessCode = "not_live"
+	readinessCodeReconciliationFailed readinessCode = "reconciliation_failed"
+	readinessCodeDataPlaneUnavailable readinessCode = "data_plane_unavailable"
+	readinessCodeStale                readinessCode = "stale"
+)
+
+func writeReadinessStatus(writer http.ResponseWriter, statusCode int, snapshot domain.HealthSnapshot) {
+	conditions := make([]readinessCondition, 0, len(snapshot.Conditions))
+	for _, condition := range snapshot.Conditions {
+		item := readinessCondition{Code: condition.Kind}
+		if condition.Family != 0 {
+			item.Family = metricFamily(condition.Family)
+		}
+		if condition.Prefix.IsValid() {
+			item.Prefix = condition.Prefix.String()
+		}
+		conditions = append(conditions, item)
+	}
+	payload := readinessStatus{
+		SchemaVersion:      1,
+		Code:               readinessStatusCode(snapshot),
+		Ready:              snapshot.Ready,
+		Phase:              snapshot.Phase,
+		DataPlaneAvailable: snapshot.DataPlaneAvailable,
+		Conditions:         conditions,
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(statusCode)
+	_ = json.NewEncoder(writer).Encode(payload)
+}
+
+func readinessStatusCode(snapshot domain.HealthSnapshot) readinessCode {
+	if snapshot.Ready {
+		if len(snapshot.Conditions) != 0 {
+			return readinessCodeReadyDegraded
+		}
+		return readinessCodeReady
+	}
+	if !snapshot.Live {
+		return readinessCodeNotLive
+	}
+	if snapshot.LastError != "" {
+		return readinessCodeReconciliationFailed
+	}
+	switch snapshot.Phase {
+	case domain.RuntimeStarting, domain.RuntimeQuarantined, domain.RuntimeReconciling, domain.RuntimeStopping:
+		return readinessCode(snapshot.Phase)
+	}
+	if !snapshot.DataPlaneAvailable {
+		return readinessCodeDataPlaneUnavailable
+	}
+	return readinessCodeStale
 }

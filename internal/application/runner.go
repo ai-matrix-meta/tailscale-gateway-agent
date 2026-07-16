@@ -267,7 +267,7 @@ func sendFailure(ctx context.Context, failures chan<- error, err error) {
 
 func (runner *Runner) execute(ctx context.Context, trigger string, retryTimer *time.Timer, retryDelay time.Duration) (time.Duration, <-chan time.Time) {
 	observedEpoch := runner.status.BeginReconcile()
-	runner.metrics.SetReady(false)
+	runner.metrics.SetReady(runner.status.HealthSnapshot().Ready)
 	started := time.Now()
 	reconcileContext, cancelReconcile := context.WithTimeout(ctx, runner.configuration.Runtime.ReconcileTimeout)
 	runner.setActiveReconcile(cancelReconcile)
@@ -296,15 +296,16 @@ func (runner *Runner) execute(ctx context.Context, trigger string, retryTimer *t
 		reconcileErr = errors.Join(reconcileErr, wrapOptional("enforce fail-closed state", failClosedErr))
 	}
 	duration := time.Since(started)
-	runner.metrics.RecordReconcile(trigger, duration, report, reconcileErr)
 	if reconcileErr != nil {
 		runner.status.RecordFailure(time.Now(), reconcileErr)
+		runner.metrics.RecordReconcile(trigger, duration, report, reconcileErr)
 		runner.metrics.SetReady(false)
 		runner.logger.ErrorContext(ctx, "gateway reconciliation failed", "trigger", trigger, "duration", duration, "error", reconcileErr)
 		resetTimer(retryTimer, retryDelay)
 		return min(retryDelay*2, 30*time.Second), retryTimer.C
 	}
-	ready := runner.status.RecordSuccess(time.Now(), observedEpoch, report.Conditions)
+	ready := runner.status.RecordSuccess(time.Now(), observedEpoch, report)
+	runner.metrics.RecordReconcile(trigger, duration, report, nil)
 	runner.metrics.SetReady(ready)
 	// An event can arrive between RecordSuccess and the metric update. Re-read
 	// status after publishing true so either ordering ends with a false gauge.

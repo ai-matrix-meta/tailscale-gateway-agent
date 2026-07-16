@@ -220,7 +220,7 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 		controller.lastPacketPolicy = desiredPolicy
 		controller.hasPacketPolicy = true
 		controller.quarantined = false
-		controller.recordRouteApprovals(&report, tailnetState, desiredPreferences)
+		controller.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
 		return report, nil
 	}
 	isolatedExitDefaultTransition := nonExitPreferencesMatch && onlyExitDefaultRoutesChanged &&
@@ -261,7 +261,7 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 		controller.lastPacketPolicy = desiredPolicy
 		controller.hasPacketPolicy = true
 		controller.quarantined = false
-		controller.recordRouteApprovals(&report, tailnetState, desiredPreferences)
+		controller.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
 		return report, nil
 	}
 
@@ -325,7 +325,7 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 	controller.lastPacketPolicy = desiredPolicy
 	controller.hasPacketPolicy = true
 	controller.quarantined = false
-	controller.recordRouteApprovals(&report, tailnetState, desiredPreferences)
+	controller.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
 	return report, nil
 }
 
@@ -773,6 +773,16 @@ func (controller *Controller) recordRouteApprovals(report *domain.ReconcileRepor
 			})
 		}
 	}
+}
+
+func (controller *Controller) completeReconcileReport(
+	report *domain.ReconcileReport,
+	state domain.TailnetState,
+	desired domain.TailnetPreferences,
+	activeExitDefaultRoutes domain.ExitDefaultRouteSet,
+) {
+	controller.recordRouteApprovals(report, state, desired)
+	report.DataPlaneAvailable = !controller.configuration.Tailnet.AdvertiseExitNode || !activeExitDefaultRoutes.Empty()
 }
 
 func normalizeAddresses(values []netip.Addr) []netip.Addr {

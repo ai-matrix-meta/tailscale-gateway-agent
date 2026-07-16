@@ -117,9 +117,13 @@ extra arguments are rejected, so containerboot cannot share the Agent's
   readback, and kernel prerequisites; otherwise table 101 is blackholed too.
 - Shutdown and coordination loss always blackhole both managed policy tables.
 
-`/livez` reports process health. `/readyz` is successful only after the latest
-complete reconciliation and becomes false immediately when a newer network
-event is observed. `/metrics` exposes bounded Prometheus metrics.
+`/livez` reports process health. `/readyz` returns a versioned JSON status and
+is successful only when the latest current reconciliation verified a
+traffic-serving data plane. Bounded operational conditions keep phase
+`degraded` and remain visible as machine-readable codes without forcing
+readiness false while the data plane is still available. A newer network event,
+technical failure, stale result, or total Exit capability loss revokes
+readiness. `/metrics` exposes bounded Prometheus metrics.
 
 ## Verification
 

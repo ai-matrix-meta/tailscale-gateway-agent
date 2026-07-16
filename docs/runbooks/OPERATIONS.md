@@ -11,8 +11,11 @@ it hosts Linux; native macOS is outside the runtime contract.
 
 - `/livez` confirms that the Agent process and health server are alive. It does
   not claim that the gateway is safe to advertise.
-- `/readyz` requires a recent, complete, unsuperseded reconciliation. A kernel
-  event revokes readiness immediately, before the next write pass starts.
+- `/readyz` requires a recent, complete, unsuperseded reconciliation whose
+  Controller result reports `dataPlaneAvailable=true`. A kernel event revokes
+  readiness immediately, before the next write pass starts. The response is
+  versioned JSON containing `code`, `ready`, `phase`, `dataPlaneAvailable`, and
+  bounded condition codes.
 - `/metrics` reports reconciliation trigger, latency, outcome, and write counts.
   A healthy no-drift audit reports zero routing, nftables, and Tailnet writes.
 
@@ -28,6 +31,36 @@ not ready, and allows ingress only when both of these labels are present:
 The Service and labels are transport contracts, not an assumption about a
 specific monitoring product. Alerting and retention require a separately
 managed monitoring system.
+
+`code=ready_degraded` with HTTP 200 means traffic remains serviceable but one or
+more bounded operational conditions require alerting. `route_not_approved`
+identifies an Admin Console-disabled prefix without removing the Pod from
+service. HTTP 503 is reserved for a non-current, stale, technically failed, or
+unavailable data plane.
+
+Schema version 1 example:
+
+```json
+{
+  "schemaVersion": 1,
+  "code": "ready_degraded",
+  "ready": true,
+  "phase": "degraded",
+  "dataPlaneAvailable": true,
+  "conditions": [
+    {
+      "code": "route_not_approved",
+      "family": "ipv4",
+      "prefix": "10.0.8.0/24"
+    }
+  ]
+}
+```
+
+Top-level `code` is a bounded contract: `ready`, `ready_degraded`, `not_live`,
+`starting`, `quarantined`, `reconciling`, `stopping`,
+`reconciliation_failed`, `data_plane_unavailable`, or `stale`. Condition codes
+remain the fixed `ReconcileConditionKind` set and never contain error text.
 
 Do not use readiness failures as a liveness restart condition. DNS, upstream,
 LocalAPI, or kernel drift may be external; the Agent already closes forwarding
@@ -50,7 +83,7 @@ Never work around discovery failure by configuring an interface name or a
 public probe address. Resolve the missing, ambiguous, down, multipath, or
 unsupported kernel route.
 
-## Degraded Runtime
+## Technical Failure
 
 On any reconciliation failure, the expected state is:
 
@@ -80,20 +113,22 @@ bootstrap deadlock and must not be treated as an external Tailnet outage.
 Each active Exit route requires a fresh successful probe for its own address
 family through the currently discovered proxy TUN. Initial debounce, an
 unavailable family, an expired success, or a proxy-link replacement produces an
-operational condition: readiness becomes false, the affected active route is
-removed, and its managed blackhole remains. These conditions do not restart the
-process or create a technical-error retry storm.
+operational condition: the affected active route is removed and its managed
+blackhole remains. Phase becomes Degraded. Readiness remains true while another
+verified Exit family is active and becomes false only when no active Exit family
+remains. These conditions do not restart the process or create a technical-error
+retry storm.
 
 Tailscale exposes an Exit Node only when both IPv4 and IPv6 defaults are
 advertised. While either family remains healthy, the Agent therefore preserves
 that atomic pair, configured subnet advertisements, and ordinary Tailnet IPv6.
 When both families are unavailable, it withdraws the pair before removing the
 final active route. Do not interpret an advertised default as proof that its
-family is currently usable; use readiness, family-labeled conditions, and table
-100 readback. The unavailable family must have no active default and must retain
-its blackhole.
+family is currently usable; use `data_plane_available`, family-labeled
+conditions, and table 100 readback. The unavailable family must have no active
+default and must retain its blackhole.
 
-Use the bounded `internet_capability_available`,
+Use the bounded `data_plane_available`, `internet_capability_available`,
 `internet_capability_probe_total`, `internet_capability_snapshot_age_seconds`,
 and `condition_active` metric families to identify the affected address family
 and state. Probe URLs, resolved addresses, and raw responses are intentionally

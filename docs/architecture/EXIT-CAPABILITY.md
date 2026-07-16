@@ -41,7 +41,8 @@ and contains neither when both families are unavailable. The Exit routing table
 independently installs an active default only for each healthy family and keeps
 the higher-metric blackhole for every unavailable family. Control-plane
 approval is observed for both defaults while the Exit Node is advertised; an
-explicit rejection degrades readiness but never causes preference-write
+explicit rejection produces a bounded Degraded condition but never causes
+readiness loss for an otherwise available data plane or preference-write
 oscillation. Subnet advertisements and ordinary Tailnet IPv6 remain independent
 of Internet capability.
 
@@ -165,17 +166,20 @@ The states are intentionally not equivalent:
 
 This asymmetry is required by the Tailscale client contract. An unavailable
 family remains fail-closed even though its default is part of the atomic
-advertisement pair; readiness and bounded family-labeled conditions expose the
-degradation.
+advertisement pair. Phase becomes Degraded and bounded family-labeled
+conditions expose the loss; readiness remains true while at least one verified
+Exit family is active.
 
 ### Reconciliation Conditions
 
-A reconciliation has two independent result channels:
+A reconciliation has three independent result channels:
 
 - a technical error, which invokes the existing fail-closed transaction and
   bounded retry; and
-- bounded operational conditions, which return no error but make readiness
-  false and phase Degraded.
+- verified data-plane availability, which determines whether a current and
+  fresh result may remain Kubernetes Ready; and
+- bounded operational conditions, which return no error and set phase
+  Degraded without implicitly deciding readiness.
 
 Condition kinds are fixed enums. Initial capability, unavailable capability,
 stale capability, proxy-link mismatch, and explicit route-not-approved are
@@ -185,6 +189,13 @@ failed readback are technical errors.
 
 Condition values may carry only a configured prefix or address family. Error
 text is never a metric label.
+
+The Controller is the sole owner of `DataPlaneAvailable`. It sets the value
+only after complete routing, nftables, kernel, and Tailnet preference readback.
+When Exit advertisement is enabled, at least one active, independently verified
+Exit family is required. Route approval conditions never change this value:
+Admin Console approval controls reachability of that advertised prefix, not the
+safety of the already verified local data plane.
 
 ## Port Contracts
 
@@ -358,8 +369,10 @@ Every pass follows this order:
 10. Read back preferences and current control-plane approval.
 11. Evaluate every desired subnet prefix and both Exit defaults against approved
    routes whenever the Exit Node pair is desired.
-12. Publish Ready only when no technical error, capability condition, approval
-    condition, or newer event exists.
+12. Report `DataPlaneAvailable=true` when the verified configuration can serve
+    at least one required traffic path. Publish Ready only when that result is
+    current and fresh; publish capability and approval conditions independently
+    as Degraded diagnostics.
 
 Capability loss is a family-scoped routing transaction. While another family
 remains healthy, the Tailnet pair and configured subnet routes remain unchanged;
@@ -379,8 +392,10 @@ installing the new one while preserving the already-advertised pair.
 
 Explicit Admin Console rejection is observed after local intent converges. It
 does not alter local preferences, delete configuration, or trigger another
-write. Approval recovery changes only the observed condition and therefore
-returns to Ready with zero preference writes.
+write. It keeps an otherwise available data plane Ready while phase and the
+`route_not_approved` condition expose the administrative disablement. Approval
+recovery changes only the observed condition and therefore returns phase to
+Ready with zero preference writes.
 
 ## Event And Freshness Strategy
 
@@ -408,7 +423,8 @@ Metrics use fixed, bounded labels:
 - capability probe attempts by `family` and fixed `result` enum;
 - capability snapshot age by `family`;
 - route approval by configured `prefix`;
-- operational condition by fixed `kind`; and
+- operational condition by fixed `kind`;
+- verified data-plane availability; and
 - existing reconciliation and write counters.
 
 The configured route set is immutable and bounded, so prefix series cannot

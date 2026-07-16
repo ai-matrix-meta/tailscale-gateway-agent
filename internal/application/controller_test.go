@@ -229,6 +229,9 @@ func TestControllerReportsRouteApprovalLossAndRecoveryWithoutPreferenceWrites(t 
 			if !slices.Equal(report.Conditions, []domain.ReconcileCondition{wantCondition}) || !report.ApprovalObserved {
 				t.Fatalf("missing approval was not reported exactly: %#v", report)
 			}
+			if !report.DataPlaneAvailable {
+				t.Fatalf("explicit route non-approval incorrectly made the verified data plane unavailable: %#v", report)
+			}
 			if fixture.tailnet.writeCalls() != 0 || report.TailnetWrites != 0 {
 				t.Fatalf("explicit non-approval rewrote preferences: calls=%d report=%#v", fixture.tailnet.writeCalls(), report)
 			}
@@ -284,6 +287,9 @@ func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 			wantCondition := domain.ReconcileCondition{Kind: domain.ConditionInternetCapabilityUnavailable, Family: unavailableFamily}
 			if !slices.Contains(lost.Conditions, wantCondition) || lost.TailnetWrites != 0 || fixture.tailnet.writeCalls() != 0 {
 				t.Fatalf("single-family loss changed the atomic Exit Node advertisement: %#v", lost)
+			}
+			if !lost.DataPlaneAvailable {
+				t.Fatalf("single-family loss made the remaining healthy Exit path unavailable: %#v", lost)
 			}
 			if lost.RoutingWrites == 0 || fixture.routing.writeCalls() != 1 || lost.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
 				t.Fatalf("single-family loss touched unrelated data-plane state: report=%#v routing_calls=%d nftables_calls=%d", lost, fixture.routing.writeCalls(), fixture.packetFilter.writeCalls())
@@ -813,6 +819,9 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 			if len(reconciled.Conditions) == 0 || reconciled.TailnetWrites != expectedTailnetWrites || fixture.tailnet.writeCalls() != expectedTailnetWrites {
 				t.Fatalf("capability state changed the atomic advertisement unexpectedly: %#v", reconciled)
 			}
+			if reconciled.DataPlaneAvailable == test.expectedActiveExitDefaultRoutes.Empty() {
+				t.Fatalf("data-plane availability does not match active Exit families: report=%#v active=%#v", reconciled, test.expectedActiveExitDefaultRoutes)
+			}
 			if reconciled.RoutingWrites == 0 || fixture.routing.writeCalls() != 1 || reconciled.PacketFilterWrites != 0 || fixture.packetFilter.writeCalls() != 0 {
 				t.Fatalf("capability state did not remain isolated to Exit defaults: report=%#v routing_calls=%d nftables_calls=%d", reconciled, fixture.routing.writeCalls(), fixture.packetFilter.writeCalls())
 			}
@@ -1190,31 +1199,56 @@ func TestStatusDoesNotOverwriteAnEventThatArrivesDuringReconciliation(t *testing
 	status.now = func() time.Time { return now }
 	epoch := status.BeginReconcile()
 	status.MarkDirty()
-	if status.RecordSuccess(now, epoch, nil) {
+	if status.RecordSuccess(now, epoch, domain.ReconcileReport{DataPlaneAvailable: true}) {
 		t.Fatal("superseded reconciliation was marked ready")
 	}
-	if status.HealthSnapshot().Ready {
-		t.Fatal("readiness ignored a newer network event")
+	if snapshot := status.HealthSnapshot(); snapshot.Ready || snapshot.DataPlaneAvailable {
+		t.Fatalf("superseded reconciliation overwrote the newer network event: %#v", snapshot)
 	}
 	nextEpoch := status.BeginReconcile()
-	if !status.RecordSuccess(now, nextEpoch, nil) || !status.HealthSnapshot().Ready {
+	if !status.RecordSuccess(now, nextEpoch, domain.ReconcileReport{DataPlaneAvailable: true}) || !status.HealthSnapshot().Ready {
 		t.Fatal("latest successful reconciliation did not become ready")
 	}
 }
 
-func TestStatusRecordsOperationalConditionsAsDegradedWithoutAnError(t *testing.T) {
+func TestStatusKeepsAnAvailableDataPlaneReadyWhileReportingDegradation(t *testing.T) {
 	status := NewStatus(time.Minute)
 	now := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
 	status.now = func() time.Time { return now }
 	condition := domain.ReconcileCondition{
 		Kind: domain.ConditionRouteNotApproved, Family: domain.IPv4, Prefix: netip.MustParsePrefix("10.0.8.0/24"),
 	}
-	if status.RecordSuccess(now, status.BeginReconcile(), []domain.ReconcileCondition{condition}) {
-		t.Fatal("reconciliation with an operational condition was marked ready")
+	if !status.RecordSuccess(now, status.BeginReconcile(), domain.ReconcileReport{
+		DataPlaneAvailable: true,
+		Conditions:         []domain.ReconcileCondition{condition},
+	}) {
+		t.Fatal("available data plane with a warning was marked not ready")
 	}
 	snapshot := status.HealthSnapshot()
-	if snapshot.Ready || snapshot.Phase != domain.RuntimeDegraded || snapshot.LastError != "" || !slices.Equal(snapshot.Conditions, []domain.ReconcileCondition{condition}) {
+	if !snapshot.Ready || !snapshot.DataPlaneAvailable || snapshot.Phase != domain.RuntimeDegraded || snapshot.LastError != "" || !slices.Equal(snapshot.Conditions, []domain.ReconcileCondition{condition}) {
 		t.Fatalf("operational degradation was not preserved: %#v", snapshot)
+	}
+}
+
+func TestStatusRejectsUnavailableDataPlaneAndPreservesRoutineAuditReadiness(t *testing.T) {
+	status := NewStatus(time.Minute)
+	now := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	status.now = func() time.Time { return now }
+	if !status.RecordSuccess(now, status.BeginReconcile(), domain.ReconcileReport{DataPlaneAvailable: true}) {
+		t.Fatal("initial verified data plane was not ready")
+	}
+
+	auditEpoch := status.BeginReconcile()
+	if !status.HealthSnapshot().Ready {
+		t.Fatal("routine audit revoked a still-current verified data plane")
+	}
+	condition := domain.ReconcileCondition{Kind: domain.ConditionInternetCapabilityUnavailable, Family: domain.IPv4}
+	if status.RecordSuccess(now, auditEpoch, domain.ReconcileReport{Conditions: []domain.ReconcileCondition{condition}}) {
+		t.Fatal("unavailable data plane was marked ready")
+	}
+	snapshot := status.HealthSnapshot()
+	if snapshot.Ready || snapshot.DataPlaneAvailable || snapshot.Phase != domain.RuntimeDegraded {
+		t.Fatalf("unavailable data plane status is inconsistent: %#v", snapshot)
 	}
 }
 

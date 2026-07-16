@@ -24,8 +24,9 @@ adapter calls.
   fresh resolver, proxy-TUN, marking, routing-readback, and kernel validation.
 - Tailscale's Exit Node advertisement is an atomic dual-default pair. If only
   one family is healthy, the other advertised family has no active route and
-  terminates at the managed blackhole; readiness remains Degraded until its
-  independently probed path recovers.
+  terminates at the managed blackhole. Phase remains Degraded until its
+  independently probed path recovers, while readiness stays true because the
+  verified remaining family can still serve Exit traffic.
 - Lost coordination and shutdown always blackhole both managed policy tables;
   they never retain the live recovery lane.
 - No-drift reconciliation invokes no writer.

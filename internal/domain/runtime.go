@@ -66,6 +66,7 @@ type NetworkEvent struct {
 
 type ReconcileReport struct {
 	Changed            bool
+	DataPlaneAvailable bool
 	RoutingWrites      int
 	PacketFilterWrites int
 	TailnetWrites      int
@@ -130,6 +131,12 @@ func (approval RouteApproval) Validate() error {
 
 func (report ReconcileReport) Validate() error {
 	var validationErrors []error
+	if !report.ApprovalObserved {
+		validationErrors = append(validationErrors, errors.New("successful reconciliation requires a complete route approval observation"))
+	}
+	if !report.DataPlaneAvailable && len(report.Conditions) == 0 {
+		validationErrors = append(validationErrors, errors.New("unavailable data plane requires an operational condition"))
+	}
 	seenConditions := make(map[ReconcileCondition]struct{}, len(report.Conditions))
 	for _, condition := range report.Conditions {
 		if err := condition.Validate(); err != nil {
@@ -168,16 +175,17 @@ const (
 )
 
 type HealthSnapshot struct {
-	Live              bool
-	Ready             bool
-	Phase             RuntimePhase
-	LastAttempt       time.Time
-	LastSuccess       time.Time
-	LastError         string
-	SuccessfulRuns    uint64
-	FailedRuns        uint64
-	ConsecutiveErrors uint64
-	Conditions        []ReconcileCondition
+	Live               bool
+	Ready              bool
+	DataPlaneAvailable bool
+	Phase              RuntimePhase
+	LastAttempt        time.Time
+	LastSuccess        time.Time
+	LastError          string
+	SuccessfulRuns     uint64
+	FailedRuns         uint64
+	ConsecutiveErrors  uint64
+	Conditions         []ReconcileCondition
 }
 
 type ProcessSpec struct {
