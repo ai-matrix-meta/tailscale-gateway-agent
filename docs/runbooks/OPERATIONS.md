@@ -197,10 +197,14 @@ trigger executes it independently against its exact full commit SHA. Every
 release therefore re-runs source gates and isolated Linux integration tests,
 builds a `linux/amd64` and `linux/arm64` OCI index, generates SBOM and provenance,
 signs the immutable digest, and verifies both platforms. Each workflow attempt
-uses a unique candidate tag. The public semver tag is promoted only as the last
-external write.
+uses a unique candidate tag. The public OCI semver tag is promoted only after
+all registry verification. A dependent job then creates or verifies the GitHub
+Release and attaches the exact immutable release metadata. Existing GitHub
+Release state is accepted only when tag, prerelease classification, commit,
+digest, and metadata asset all match.
 
 Use only the real OCI digest reported by the completed release metadata. Do not
 deploy a candidate tag, signature artifact tag, old digest, or mutable semver
 tag. Update the Kubernetes image digest only after the Agent commit is pushed
-and the complete release workflow succeeds.
+and the complete release workflow, including GitHub Release publication,
+succeeds.

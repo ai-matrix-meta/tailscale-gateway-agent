@@ -86,7 +86,12 @@ Release jobs rerun source and isolated Linux integration gates. They publish a
 two-platform OCI index, SBOM, provenance, and keyless signature under an
 immutable digest. Each attempt has a unique candidate tag. The public semver tag
 is promoted by digest only after complete registry and runtime readback and is
-the job's final external write.
+the publish job's final registry write.
+
+The GitHub Release is published only by a dependent job after OCI promotion
+succeeds. It carries the same immutable metadata as an attached asset. Existing
+Release state is verified and never overwritten when its tag, commit, digest,
+classification, or metadata differs.
 
 Manual releases can run only from `main`. Signature and provenance verification
 binds the certificate to the exact release workflow identity on `main` or the

@@ -234,4 +234,8 @@ before side effects.
 - Multi-platform registry manifests, runtime metadata, SBOM, provenance, and
   keyless signature are read back before a release tag is promoted.
 - Every execution uses a unique candidate tag. Release promotion is by the
-  build-produced OCI digest only and is the final external write in the job.
+  build-produced OCI digest only and is the final registry write in the publish
+  job.
+- A dependent job creates or verifies the GitHub Release only after OCI
+  publication succeeds and binds its attached metadata to the same tag, commit,
+  digest, creation time, and platform set.
