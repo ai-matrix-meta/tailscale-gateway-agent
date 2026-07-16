@@ -133,33 +133,33 @@ func runAgent(ctx context.Context, superviseContainerboot bool) error {
 	}()
 	var internetCapability application.InternetCapabilityObserver
 	if internetProber != nil {
-		monitor, monitorErr := capabilityapplication.NewMonitor(
+		tracker, trackerErr := capabilityapplication.NewTracker(
 			configuration.InternetCapability,
 			configuration.Network.LocalEgressPacketMark,
 			internetProber,
 			telemetry,
 		)
-		if monitorErr != nil {
-			return fmt.Errorf("configure Internet capability monitor: %w", monitorErr)
+		if trackerErr != nil {
+			return fmt.Errorf("configure Internet capability tracker: %w", trackerErr)
 		}
-		internetCapability = monitor
+		internetCapability = tracker
 	}
-	controller, err := application.NewController(configuration, application.ControllerDependencies{
+	reconciler, err := application.NewReconciler(configuration, application.ReconcilerDependencies{
 		Kernel: kerneladapter.NewForwardingChecker(), ProxyTunnel: network, Network: network, Routing: network,
 		PacketFilter: packetFilter, Resolver: resolver, Tailnet: tailnet, InternetCapability: internetCapability, Logger: logger,
 	})
 	if err != nil {
+		return fmt.Errorf("configure reconciler: %w", err)
+	}
+	controller, err := application.NewController(configuration, reconciler, network, tailnet, status, telemetry, logger)
+	if err != nil {
 		return fmt.Errorf("configure controller: %w", err)
 	}
-	runner, err := application.NewRunner(configuration, controller, network, tailnet, status, telemetry, logger)
-	if err != nil {
-		return fmt.Errorf("configure reconciler runner: %w", err)
-	}
 
-	dependencies := application.RuntimeDependencies{
+	dependencies := application.SupervisorDependencies{
 		Coordinator: ownershipCoordinator,
+		Reconciler:  reconciler,
 		Controller:  controller,
-		Runner:      runner,
 		Status:      status,
 		Health:      telemetry,
 		Logger:      logger,
@@ -169,11 +169,11 @@ func runAgent(ctx context.Context, superviseContainerboot bool) error {
 		dependencies.Processes = processadapter.NewLauncher()
 		dependencies.Process = &processSpecification
 	}
-	runtime, err := application.NewRuntime(configuration, dependencies)
+	supervisor, err := application.NewSupervisor(configuration, dependencies)
 	if err != nil {
-		return fmt.Errorf("configure runtime: %w", err)
+		return fmt.Errorf("configure supervisor: %w", err)
 	}
-	return runtime.Run(ctx)
+	return supervisor.Run(ctx)
 }
 
 func configureInternetProber(advertiseExitNode bool, ipv4URL, ipv6URL string, timeout time.Duration) (*internetprobeadapter.Adapter, error) {

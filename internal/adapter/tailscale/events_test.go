@@ -11,14 +11,17 @@ import (
 
 	"github.com/ai-matrix-meta/tailscale-gateway-agent/internal/domain"
 	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
-	"tailscale.com/types/netmap"
 )
 
 func TestNormalizeTailnetEventsDropsThirdPartyPayloads(t *testing.T) {
 	state := ipn.Running
 	got := normalizeTailnetEvents(ipn.Notify{
-		State: &state, NetMap: &netmap.NetworkMap{}, SelfChange: &tailcfg.Node{},
+		State:         &state,
+		InitialStatus: &ipnstate.Status{},
+		PeersChanged:  []*tailcfg.Node{{}},
+		SelfChange:    &tailcfg.Node{},
 	})
 	want := []domain.TailnetEvent{
 		{Kind: domain.TailnetEventStateChanged},

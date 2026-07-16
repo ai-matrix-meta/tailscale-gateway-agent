@@ -16,8 +16,8 @@ import (
 )
 
 func TestNetworkEventCancelsActiveReconcileAndSchedulesFreshDiscovery(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{}, 1)
@@ -28,13 +28,13 @@ func TestNetworkEventCancelsActiveReconcileAndSchedulesFreshDiscovery(t *testing
 	status := NewStatus(time.Minute)
 	metrics := newFakeMetrics()
 	events := newFakeNetworkEvents()
-	runner, err := NewRunner(fixture.configuration, fixture.controller, events, newFakeTailnetEvents(), status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	controller, err := NewController(fixture.configuration, fixture.reconciler, events, newFakeTailnetEvents(), status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
-	go func() { result <- runner.Run(ctx) }()
+	go func() { result <- controller.Run(ctx) }()
 
 	select {
 	case <-entered:
@@ -59,13 +59,13 @@ func TestNetworkEventCancelsActiveReconcileAndSchedulesFreshDiscovery(t *testing
 	}
 	cancel()
 	if err := <-result; err != nil {
-		t.Fatalf("runner shutdown failed: %v", err)
+		t.Fatalf("controller shutdown failed: %v", err)
 	}
 }
 
 func TestTailnetEventCancelsActiveReconcileAndSchedulesFreshObservation(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{}, 1)
@@ -76,8 +76,8 @@ func TestTailnetEventCancelsActiveReconcileAndSchedulesFreshObservation(t *testi
 	status := NewStatus(time.Minute)
 	metrics := newFakeMetrics()
 	tailnetEvents := newFakeTailnetEvents()
-	runner, err := NewRunner(
-		fixture.configuration, fixture.controller, newFakeNetworkEvents(), tailnetEvents,
+	controller, err := NewController(
+		fixture.configuration, fixture.reconciler, newFakeNetworkEvents(), tailnetEvents,
 		status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	if err != nil {
@@ -85,7 +85,7 @@ func TestTailnetEventCancelsActiveReconcileAndSchedulesFreshObservation(t *testi
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
-	go func() { result <- runner.Run(ctx) }()
+	go func() { result <- controller.Run(ctx) }()
 
 	select {
 	case <-entered:
@@ -112,31 +112,31 @@ func TestTailnetEventCancelsActiveReconcileAndSchedulesFreshObservation(t *testi
 	}
 	cancel()
 	if err := <-result; err != nil {
-		t.Fatalf("runner shutdown failed: %v", err)
+		t.Fatalf("controller shutdown failed: %v", err)
 	}
 }
 
 func TestTailnetWatchReconnectsWithoutStoppingAuthoritativePolling(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	status := NewStatus(time.Minute)
 	metrics := newFakeMetrics()
 	tailnetEvents := newRecoveringTailnetEvents()
-	runner, err := NewRunner(
-		fixture.configuration, fixture.controller, newFakeNetworkEvents(), tailnetEvents,
+	controller, err := NewController(
+		fixture.configuration, fixture.reconciler, newFakeNetworkEvents(), tailnetEvents,
 		status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.tailnetWatchInitialDelay = time.Millisecond
-	runner.tailnetWatchMaximumDelay = 4 * time.Millisecond
+	controller.tailnetWatchInitialDelay = time.Millisecond
+	controller.tailnetWatchMaximumDelay = 4 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
-	go func() { result <- runner.Run(ctx) }()
+	go func() { result <- controller.Run(ctx) }()
 	for want := 1; want <= 2; want++ {
 		select {
 		case got := <-tailnetEvents.subscribed:
@@ -158,12 +158,12 @@ func TestTailnetWatchReconnectsWithoutStoppingAuthoritativePolling(t *testing.T)
 	select {
 	case runErr := <-result:
 		cancel()
-		t.Fatalf("runner exited on a non-authoritative watch failure: %v", runErr)
+		t.Fatalf("controller exited on a non-authoritative watch failure: %v", runErr)
 	default:
 	}
 	cancel()
 	if err := <-result; err != nil {
-		t.Fatalf("runner shutdown failed: %v", err)
+		t.Fatalf("controller shutdown failed: %v", err)
 	}
 }
 
@@ -179,25 +179,25 @@ func TestTailnetWatchBackoffSaturates(t *testing.T) {
 	}
 }
 
-func TestRunnerSchedulesCapabilityAuditAtTheConfiguredCadence(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestControllerSchedulesCapabilityAuditAtTheConfiguredCadence(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	metrics := newFakeMetrics()
-	runner, err := NewRunner(
-		fixture.configuration, fixture.controller, newFakeNetworkEvents(), newFakeTailnetEvents(),
+	controller, err := NewController(
+		fixture.configuration, fixture.reconciler, newFakeNetworkEvents(), newFakeTailnetEvents(),
 		NewStatus(time.Minute), metrics, slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.configuration.InternetCapability.ProbeInterval = 10 * time.Millisecond
-	runner.configuration.Runtime.EventDebounce = time.Millisecond
+	controller.configuration.InternetCapability.ProbeInterval = 10 * time.Millisecond
+	controller.configuration.Runtime.EventDebounce = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
-	go func() { result <- runner.Run(ctx) }()
+	go func() { result <- controller.Run(ctx) }()
 	deadline := time.NewTimer(2 * time.Second)
 	defer deadline.Stop()
 	for {
@@ -206,13 +206,13 @@ func TestRunnerSchedulesCapabilityAuditAtTheConfiguredCadence(t *testing.T) {
 			if trigger == "capability_audit" {
 				cancel()
 				if err := <-result; err != nil {
-					t.Fatalf("runner shutdown failed: %v", err)
+					t.Fatalf("controller shutdown failed: %v", err)
 				}
 				return
 			}
 		case runErr := <-result:
 			cancel()
-			t.Fatalf("runner exited before a capability audit: %v", runErr)
+			t.Fatalf("controller exited before a capability audit: %v", runErr)
 		case <-deadline.C:
 			cancel()
 			<-result
@@ -239,9 +239,9 @@ func waitForFailedRuns(t *testing.T, status *Status, minimum uint64) {
 	}
 }
 
-func TestRunnerEnforcesConfiguredReconcileTimeout(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestControllerEnforcesConfiguredReconcileTimeout(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{}, 1)
@@ -250,9 +250,9 @@ func TestRunnerEnforcesConfiguredReconcileTimeout(t *testing.T) {
 	fixture.configuration.Runtime.ReconcileTimeout = 20 * time.Millisecond
 
 	status := NewStatus(time.Minute)
-	runner, err := NewRunner(
+	controller, err := NewController(
 		fixture.configuration,
-		fixture.controller,
+		fixture.reconciler,
 		newFakeNetworkEvents(),
 		newFakeTailnetEvents(),
 		status,
@@ -264,7 +264,7 @@ func TestRunnerEnforcesConfiguredReconcileTimeout(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
-	go func() { result <- runner.Run(ctx) }()
+	go func() { result <- controller.Run(ctx) }()
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
@@ -286,18 +286,18 @@ func TestRunnerEnforcesConfiguredReconcileTimeout(t *testing.T) {
 	}
 	cancel()
 	if err := <-result; err != nil {
-		t.Fatalf("runner shutdown failed: %v", err)
+		t.Fatalf("controller shutdown failed: %v", err)
 	}
 }
 
-func TestRuntimePrepareUsesConfiguredReconcileTimeout(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestSupervisorPrepareUsesConfiguredReconcileTimeout(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	fixture.discovery.proxyTunnelEntered = make(chan struct{}, 1)
 	fixture.discovery.proxyTunnelRelease = make(chan struct{})
 	status := NewStatus(time.Minute)
-	runner, err := NewRunner(
+	controller, err := NewController(
 		fixture.configuration,
-		fixture.controller,
+		fixture.reconciler,
 		newFakeNetworkEvents(),
 		newFakeTailnetEvents(),
 		status,
@@ -309,10 +309,10 @@ func TestRuntimePrepareUsesConfiguredReconcileTimeout(t *testing.T) {
 	}
 	launcher := &fakeProcessLauncher{recorder: fixture.recorder}
 	processSpecification := domain.NewProcessSpec("/usr/local/bin/containerboot", nil, []string{"PATH=/usr/local/bin:/usr/bin"})
-	runtime, err := NewRuntime(fixture.configuration, RuntimeDependencies{
+	supervisor, err := NewSupervisor(fixture.configuration, SupervisorDependencies{
 		Coordinator: directCoordinator{},
-		Controller:  fixture.controller,
-		Runner:      runner,
+		Reconciler:  fixture.reconciler,
+		Controller:  controller,
 		Status:      status,
 		Health:      blockingHealthServer{},
 		Processes:   launcher,
@@ -322,10 +322,10 @@ func TestRuntimePrepareUsesConfiguredReconcileTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime.configuration.Runtime.ReconcileTimeout = 20 * time.Millisecond
+	supervisor.configuration.Runtime.ReconcileTimeout = 20 * time.Millisecond
 
 	result := make(chan error, 1)
-	go func() { result <- runtime.runOwned(context.Background()) }()
+	go func() { result <- supervisor.runOwned(context.Background()) }()
 	select {
 	case <-fixture.discovery.proxyTunnelEntered:
 	case <-time.After(time.Second):
@@ -365,21 +365,21 @@ func waitForDirtyEpoch(t *testing.T, status *Status, minimum uint64) {
 	}
 }
 
-func TestSupervisedRuntimeShutdownOrder(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestSupervisorShutdownOrderInSupervisedMode(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	status := NewStatus(time.Minute)
 	metrics := newFakeMetrics()
 	events := newFakeNetworkEvents()
-	runner, err := NewRunner(fixture.configuration, fixture.controller, events, newFakeTailnetEvents(), status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	controller, err := NewController(fixture.configuration, fixture.reconciler, events, newFakeTailnetEvents(), status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	launcher := &fakeProcessLauncher{recorder: fixture.recorder}
 	processSpecification := domain.NewProcessSpec("/usr/local/bin/containerboot", nil, []string{"PATH=/usr/local/bin:/usr/bin"})
-	runtime, err := NewRuntime(fixture.configuration, RuntimeDependencies{
+	supervisor, err := NewSupervisor(fixture.configuration, SupervisorDependencies{
 		Coordinator: directCoordinator{},
-		Controller:  fixture.controller,
-		Runner:      runner,
+		Reconciler:  fixture.reconciler,
+		Controller:  controller,
 		Status:      status,
 		Health:      blockingHealthServer{},
 		Processes:   launcher,
@@ -392,12 +392,12 @@ func TestSupervisedRuntimeShutdownOrder(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
-	go func() { result <- runtime.Run(ctx) }()
+	go func() { result <- supervisor.Run(ctx) }()
 	select {
 	case <-metrics.ready:
 	case <-time.After(5 * time.Second):
 		cancel()
-		t.Fatal("runtime did not become ready")
+		t.Fatal("supervisor did not become ready")
 	}
 	startup := fixture.recorder.snapshot()
 	quarantineIndex := slices.Index(startup, "nftables-closed")
@@ -410,7 +410,7 @@ func TestSupervisedRuntimeShutdownOrder(t *testing.T) {
 	fixture.recorder.reset()
 	cancel()
 	if err := <-result; err != nil {
-		t.Fatalf("runtime shutdown failed: %v", err)
+		t.Fatalf("supervisor shutdown failed: %v", err)
 	}
 	want := []string{"nftables-closed", "routing", "advertisements-cleared", "containerboot-terminated"}
 	if got := fixture.recorder.snapshot(); !slices.Equal(got, want) {
@@ -419,20 +419,20 @@ func TestSupervisedRuntimeShutdownOrder(t *testing.T) {
 }
 
 func TestCoordinationLossFailsClosedBeforeTerminatingSupervisedProcess(t *testing.T) {
-	fixture := newControllerFixture(t)
+	fixture := newReconcilerFixture(t)
 	status := NewStatus(time.Minute)
 	metrics := newFakeMetrics()
-	runner, err := NewRunner(fixture.configuration, fixture.controller, newFakeNetworkEvents(), newFakeTailnetEvents(), status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	controller, err := NewController(fixture.configuration, fixture.reconciler, newFakeNetworkEvents(), newFakeTailnetEvents(), status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	coordinator := &revocableCoordinator{revoke: make(chan struct{})}
 	launcher := &fakeProcessLauncher{recorder: fixture.recorder}
 	processSpecification := domain.NewProcessSpec("/usr/local/bin/containerboot", nil, []string{"PATH=/usr/local/bin:/usr/bin"})
-	runtime, err := NewRuntime(fixture.configuration, RuntimeDependencies{
+	supervisor, err := NewSupervisor(fixture.configuration, SupervisorDependencies{
 		Coordinator: coordinator,
-		Controller:  fixture.controller,
-		Runner:      runner,
+		Reconciler:  fixture.reconciler,
+		Controller:  controller,
 		Status:      status,
 		Health:      blockingHealthServer{},
 		Processes:   launcher,
@@ -444,11 +444,11 @@ func TestCoordinationLossFailsClosedBeforeTerminatingSupervisedProcess(t *testin
 	}
 
 	result := make(chan error, 1)
-	go func() { result <- runtime.Run(context.Background()) }()
+	go func() { result <- supervisor.Run(context.Background()) }()
 	select {
 	case <-metrics.ready:
 	case <-time.After(5 * time.Second):
-		t.Fatal("runtime did not become ready before coordination revocation")
+		t.Fatal("supervisor did not become ready before coordination revocation")
 	}
 	fixture.recorder.reset()
 	close(coordinator.revoke)
@@ -458,7 +458,7 @@ func TestCoordinationLossFailsClosedBeforeTerminatingSupervisedProcess(t *testin
 			t.Fatalf("coordination loss was not propagated: %v", runErr)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("runtime did not stop after coordination loss")
+		t.Fatal("supervisor did not stop after coordination loss")
 	}
 	want := []string{"nftables-closed", "routing", "advertisements-cleared", "containerboot-terminated"}
 	if got := fixture.recorder.snapshot(); !slices.Equal(got, want) {
@@ -466,22 +466,22 @@ func TestCoordinationLossFailsClosedBeforeTerminatingSupervisedProcess(t *testin
 	}
 }
 
-func TestRuntimeCancellationTakesOverAnActiveRunnerFailClosedPass(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestSupervisorCancellationTakesOverAnActiveControllerFailClosedPass(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	fixture.configuration.Runtime.ShutdownTimeout = 5 * time.Second
 	status := NewStatus(time.Minute)
 	metrics := newFakeMetrics()
 	events := newFakeNetworkEvents()
-	runner, err := NewRunner(fixture.configuration, fixture.controller, events, newFakeTailnetEvents(), status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	controller, err := NewController(fixture.configuration, fixture.reconciler, events, newFakeTailnetEvents(), status, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	launcher := &fakeProcessLauncher{recorder: fixture.recorder}
 	processSpecification := domain.NewProcessSpec("/usr/local/bin/containerboot", nil, []string{"PATH=/usr/local/bin:/usr/bin"})
-	runtime, err := NewRuntime(fixture.configuration, RuntimeDependencies{
+	supervisor, err := NewSupervisor(fixture.configuration, SupervisorDependencies{
 		Coordinator: directCoordinator{},
-		Controller:  fixture.controller,
-		Runner:      runner,
+		Reconciler:  fixture.reconciler,
+		Controller:  controller,
 		Status:      status,
 		Health:      blockingHealthServer{},
 		Processes:   launcher,
@@ -494,12 +494,12 @@ func TestRuntimeCancellationTakesOverAnActiveRunnerFailClosedPass(t *testing.T) 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
-	go func() { result <- runtime.Run(ctx) }()
+	go func() { result <- supervisor.Run(ctx) }()
 	select {
 	case <-metrics.ready:
 	case <-time.After(5 * time.Second):
 		cancel()
-		t.Fatal("runtime did not become ready")
+		t.Fatal("supervisor did not become ready")
 	}
 
 	entered := make(chan struct{}, 1)
@@ -515,21 +515,21 @@ func TestRuntimeCancellationTakesOverAnActiveRunnerFailClosedPass(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		cancel()
 		close(release)
-		t.Fatal("Runner did not enter fail-closed handling")
+		t.Fatal("Controller did not enter fail-closed handling")
 	}
 
-	// Cancel after Runner has crossed its live-failure check. Its fail-closed
-	// context must be canceled so Runtime can execute the one complete shutdown.
+	// Cancel after Controller has crossed its live-failure check. Its fail-closed
+	// context must be canceled so Supervisor can execute the one complete shutdown.
 	cancel()
 	select {
 	case runErr := <-result:
 		if runErr != nil {
-			t.Fatalf("runtime shutdown failed: %v", runErr)
+			t.Fatalf("supervisor shutdown failed: %v", runErr)
 		}
 	case <-time.After(time.Second):
 		close(release)
 		<-result
-		t.Fatal("Runtime waited for Runner's independent shutdown timeout")
+		t.Fatal("Supervisor waited for Controller's independent shutdown timeout")
 	}
 	close(release)
 

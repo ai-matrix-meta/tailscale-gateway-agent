@@ -463,7 +463,7 @@ func TestRouteEventForwarderAcknowledgesOnlyTheExpectedSelfMutation(t *testing.T
 	}
 	select {
 	case event := <-events:
-		t.Fatalf("self route mutation leaked to the Runner: %#v", event)
+		t.Fatalf("self route mutation leaked to the Controller: %#v", event)
 	default:
 	}
 }

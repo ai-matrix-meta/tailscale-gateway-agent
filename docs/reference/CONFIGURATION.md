@@ -154,7 +154,7 @@ cancellation and the configured pass deadline are not merely advisory.
 - `TAILSCALE_GATEWAY_COORDINATION_ACQUIRE_TIMEOUT`: `5m`.
 
 Lease timing must satisfy lease duration greater than renew deadline greater
-than retry period. A lost Lease cancels the owned runtime and completes
+than retry period. A lost Lease cancels the owned Supervisor run and completes
 fail-closed shutdown before releasing process control.
 
 ## Containerboot Boundary

@@ -142,10 +142,12 @@ namespace explicitly and verifies real netlink and nftables convergence.
 
 Release tags produce a signed multi-platform scratch image for `linux/amd64`
 and `linux/arm64`. Every workflow attempt publishes a unique candidate. The
-public semver tag is the final external write and is promoted only after source,
-integration, platform, metadata, SBOM, provenance, signature, and runtime
-verification. Kubernetes configuration uses the reported immutable OCI digest,
-never a mutable image tag.
+public OCI semver tag is promoted only after source, integration, platform,
+metadata, SBOM, provenance, signature, and runtime verification. The workflow
+then creates or verifies an immutable GitHub Release and attaches the exact
+`release-metadata.json`; mismatched existing release metadata fails closed.
+Kubernetes configuration uses the reported immutable OCI digest, never a
+mutable image tag.
 
 ## Documentation
 

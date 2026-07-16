@@ -107,6 +107,8 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout validated commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -115,7 +117,7 @@ jobs:
           ref: ${{ needs.validate.outputs.commit }}
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -157,7 +159,7 @@ jobs:
           sbom: true
 
       - name: Attest build provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-name: ${{ needs.validate.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -271,9 +273,9 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      # This must remain the final step. All source, platform, metadata,
+      # This is the final registry write. All source, platform, metadata,
       # signature, provenance, and runtime verification completes before the
-      # public semver tag becomes visible; no external write follows it.
+      # public OCI semver tag becomes visible.
       - name: Promote verified release tag
         env:
           IMAGE: ${{ needs.validate.outputs.image }}
@@ -287,3 +289,85 @@ jobs:
             "${crane}" tag "${IMAGE}@${IMAGE_DIGEST}" "${IMAGE_TAG}"
           fi
           [[ "$("${crane}" digest "${IMAGE}:${IMAGE_TAG}")" == "${IMAGE_DIGEST}" ]] || { echo "release tag promotion did not converge"; exit 1; }
+
+  github-release:
+    name: Publish immutable GitHub Release
+    needs:
+      - validate
+      - verification
+      - publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create or verify GitHub Release
+        env:
+          COMMIT: ${{ needs.validate.outputs.commit }}
+          CREATED: ${{ needs.validate.outputs.created }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ needs.validate.outputs.image }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+        run: |
+          jq -n \
+            --arg image "${IMAGE}" \
+            --arg digest "${IMAGE_DIGEST}" \
+            --arg commit "${COMMIT}" \
+            --arg created "${CREATED}" \
+            --arg release "${RELEASE_TAG}" \
+            '{schema: 1, image: $image, digest: $digest, commit: $commit, created: $created, release: $release, platforms: ["linux/amd64", "linux/arm64"]}' \
+            > release-metadata.json
+
+          # Backticks in these format strings are literal Markdown delimiters.
+          # shellcheck disable=SC2016
+          {
+            printf 'Immutable production release of Tailscale Gateway Agent.\n\n'
+            printf 'OCI image: `%s@%s`  \n' "${IMAGE}" "${IMAGE_DIGEST}"
+            printf 'Commit: `%s`  \n' "${COMMIT}"
+            printf 'Platforms: `linux/amd64`, `linux/arm64`\n\n'
+            printf 'The release workflow verified source quality, isolated Linux integration, scratch-image runtime, CA trust, SBOM, SLSA provenance, and keyless signature before publishing this Release.\n'
+          } > release-notes.md
+
+          prerelease=false
+          release_flags=(--latest)
+          if [[ "${RELEASE_TAG}" == *-* ]]; then
+            prerelease=true
+            release_flags=(--prerelease)
+          fi
+
+          if release_json="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName,name,isDraft,isPrerelease,body 2>/dev/null)"; then
+            jq -e \
+              --arg tag "${RELEASE_TAG}" \
+              --arg commit "${COMMIT}" \
+              --arg digest "${IMAGE_DIGEST}" \
+              --argjson prerelease "${prerelease}" '
+                .tagName == $tag and
+                .name == $tag and
+                .isDraft == false and
+                .isPrerelease == $prerelease and
+                (.body | contains($commit)) and
+                (.body | contains($digest))
+              ' <<<"${release_json}" >/dev/null
+          else
+            gh release create "${RELEASE_TAG}" release-metadata.json \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "${RELEASE_TAG}" \
+              --notes-file release-notes.md \
+              "${release_flags[@]}"
+          fi
+
+          rm -rf observed-release
+          mkdir observed-release
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern release-metadata.json \
+            --dir observed-release
+          cmp release-metadata.json observed-release/release-metadata.json
+
+          release_url="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json url --jq .url)"
+          {
+            printf '## GitHub Release\n\n'
+            printf '%s\n' "${release_url}"
+          } >> "${GITHUB_STEP_SUMMARY}"

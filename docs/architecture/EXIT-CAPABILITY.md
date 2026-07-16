@@ -2,7 +2,7 @@
 
 ## Decision
 
-Exit capability monitoring is part of the existing Agent executable and
+Exit capability tracking is part of the existing Agent executable and
 process. The Kubernetes `agent-installer` continues to copy that one static
 executable into the shared tools volume, and the official Tailscale container
 continues to run it as PID 1. The same executable runs directly under a VM or
@@ -62,7 +62,7 @@ those requests over the same proxy TUN path used by Exit traffic.
 - Replacing the external Tailnet traffic matrix with an internal probe.
 - Moving Tailscale, sing-box, or Kubernetes lifecycle ownership into the
   capability component.
-- Writing Tailscale preferences from the monitor or probe adapter.
+- Writing Tailscale preferences from the tracker or probe adapter.
 
 ## Package And Call Direction
 
@@ -96,7 +96,7 @@ internal/domain
 ```
 
 The root application package does not import the capability subpackage. It
-defines consumer-owned observation interfaces. The monitor satisfies those
+defines consumer-owned observation interfaces. The tracker satisfies those
 interfaces implicitly, and bootstrap injects the concrete instance. This
 keeps bootstrap as the only concrete composition root and prevents a package
 cycle or an application-to-adapter dependency.
@@ -152,7 +152,7 @@ families may have active defaults in the Exit table. It is not a Tailnet
 advertisement shape. Separate constructors make non-Exit and Exit Node intent
 explicit; the Exit Node constructor always emits both defaults atomically.
 LocalAPI normalization still accepts zero, one, or two observed defaults so the
-controller can safely repair legacy, externally edited, or partially converged
+reconciler can safely repair legacy, externally edited, or partially converged
 preferences.
 
 The states are intentionally not equivalent:
@@ -190,7 +190,7 @@ failed readback are technical errors.
 Condition values may carry only a configured prefix or address family. Error
 text is never a metric label.
 
-The Controller is the sole owner of `DataPlaneAvailable`. It sets the value
+The Reconciler is the sole owner of `DataPlaneAvailable`. It sets the value
 only after complete routing, nftables, kernel, and Tailnet preference readback.
 When Exit advertisement is enabled, at least one active, independently verified
 Exit family is required. Route approval conditions never change this value:
@@ -210,7 +210,7 @@ coordination or network writes. The application component does not receive an
 HTTP client or response and treats ordinary probe failure as a conclusive
 negative family observation, not as a process error.
 
-The controller consumes a minimal capability observer:
+The reconciler consumes a minimal capability observer:
 
 ```text
 Observe(context, proxy LinkIdentity) -> snapshot, error
@@ -303,16 +303,16 @@ The final scratch image must contain a reviewed CA trust bundle copied from a
 pinned build stage. CI must build both platforms and execute an HTTPS trust
 smoke test without publishing the image.
 
-## Monitor State Machine
+## Tracker State Machine
 
-Runner remains the only scheduler. It adds a capability audit trigger using
-the configured interval. Controller calls the monitor after discovering and
-validating the current proxy TUN. The monitor probes when the interval is due,
+Controller remains the only scheduler. It adds a capability audit trigger using
+the configured interval. Reconciler calls the tracker after discovering and
+validating the current proxy TUN. The tracker probes when the interval is due,
 on the first observation, after expiration, or when link identity changes.
 
 IPv4 and IPv6 probes execute concurrently with a strict maximum of two
 in-flight calls. Both inherit the reconciliation context and per-probe timeout,
-and the monitor joins both calls before returning. It owns no long-lived
+and the tracker joins both calls before returning. It owns no long-lived
 goroutine or timer.
 
 For each family:
@@ -337,7 +337,7 @@ Counters saturate at their configured threshold. Parent cancellation is
 inconclusive and does not count as a family failure. A proxy link identity
 change invalidates both old successes before probing the new link.
 
-## Controller Transaction
+## Reconciler Transaction
 
 Every pass follows this order:
 
@@ -436,7 +436,7 @@ Structured warning logs include only fixed condition kind, address family or
 configured prefix, observation time, and a bounded sanitized reason. Probe
 URLs and raw network responses are not logged.
 
-## Runtime And Deployment
+## Supervisor And Deployment
 
 The Kubernetes topology remains unchanged:
 
@@ -446,9 +446,9 @@ agent-installer init container
 
 official tailscale application container
   -> /tools/tailscale-gateway-agent supervise-containerboot
-     -> Runner
      -> Controller
-     -> in-process capability monitor
+     -> Reconciler
+     -> in-process capability tracker
      -> health and metrics
      -> official /usr/local/bin/containerboot child
 ```
@@ -462,10 +462,10 @@ In external `run` mode, the service manager starts the same binary. Tailscaled
 and sing-box remain externally managed, and the same configured proxy TUN
 identity and probe contract apply.
 
-Shutdown order remains Runner stop, fail-closed Controller cleanup, supervised
-containerboot termination, and coordination release. Because the monitor owns
-no long-lived goroutine, stopping Runner joins every possible probe before
-Controller shutdown begins.
+Shutdown order remains Controller stop, fail-closed Reconciler cleanup, supervised
+containerboot termination, and coordination release. Because the tracker owns
+no long-lived goroutine, stopping Controller joins every possible probe before
+Reconciler shutdown begins.
 
 ## Verification Contract
 
@@ -494,11 +494,11 @@ Unit and deterministic adapter tests must cover:
   offline control poll, nil AllowedIPs, HA standby, and separate Exit-default
   approval;
 - Admin disable and restore with zero corrective preference writes; and
-- no monitor goroutine, timer, process, container, volume, or IPC regression.
+- no tracker goroutine, timer, process, container, volume, or IPC regression.
 
 Linux integration must prove that sockets carry the configured mark, bind to
 the discovered proxy TUN, traverse sing-box and upstream SOCKS, and reach the
-approved IPv4-only and IPv6-only targets. The fourth-round runtime test must
+approved IPv4-only and IPv6-only targets. The controller integration test must
 also prove capability loss and recovery ordering without regressing route
 event handling, zero-write convergence, or cleanup.
 

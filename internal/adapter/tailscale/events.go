@@ -10,8 +10,9 @@ import (
 )
 
 const tailnetWatchMask = ipn.NotifyInitialState |
-	ipn.NotifyInitialNetMap |
-	ipn.NotifyNoPrivateKeys |
+	ipn.NotifyInitialStatus |
+	ipn.NotifyPeerChanges |
+	ipn.NotifyNoNetMap |
 	ipn.NotifyRateLimit
 
 type ipnBusWatcher interface {
@@ -72,10 +73,10 @@ func forwardTailnetEvents(ctx context.Context, watcher ipnBusWatcher, events cha
 
 func normalizeTailnetEvents(notification ipn.Notify) []domain.TailnetEvent {
 	events := make([]domain.TailnetEvent, 0, 3)
-	if notification.State != nil {
+	if notification.State != nil || notification.InitialStatus != nil {
 		events = append(events, domain.TailnetEvent{Kind: domain.TailnetEventStateChanged})
 	}
-	if notification.NetMap != nil {
+	if len(notification.PeersChanged) != 0 || len(notification.PeersRemoved) != 0 || len(notification.PeerChangedPatch) != 0 {
 		events = append(events, domain.TailnetEvent{Kind: domain.TailnetEventNetworkMap})
 	}
 	if notification.SelfChange != nil {

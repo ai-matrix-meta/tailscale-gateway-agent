@@ -13,9 +13,9 @@ import (
 	"github.com/ai-matrix-meta/tailscale-gateway-agent/internal/port"
 )
 
-type Runner struct {
+type Controller struct {
 	configuration            domain.Configuration
-	controller               *Controller
+	reconciler               *Reconciler
 	networkEvents            port.NetworkEventSource
 	tailnetEvents            port.TailnetEventSource
 	status                   *Status
@@ -27,23 +27,23 @@ type Runner struct {
 	activeCancel             context.CancelFunc
 }
 
-func NewRunner(configuration domain.Configuration, controller *Controller, networkEvents port.NetworkEventSource, tailnetEvents port.TailnetEventSource, status *Status, metrics port.MetricsRecorder, logger *slog.Logger) (*Runner, error) {
-	if controller == nil || networkEvents == nil || tailnetEvents == nil || status == nil || metrics == nil {
-		return nil, errors.New("all runner dependencies are required")
+func NewController(configuration domain.Configuration, reconciler *Reconciler, networkEvents port.NetworkEventSource, tailnetEvents port.TailnetEventSource, status *Status, metrics port.MetricsRecorder, logger *slog.Logger) (*Controller, error) {
+	if reconciler == nil || networkEvents == nil || tailnetEvents == nil || status == nil || metrics == nil {
+		return nil, errors.New("all controller dependencies are required")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Runner{
-		configuration: configuration, controller: controller, networkEvents: networkEvents, tailnetEvents: tailnetEvents,
+	return &Controller{
+		configuration: configuration, reconciler: reconciler, networkEvents: networkEvents, tailnetEvents: tailnetEvents,
 		status: status, metrics: metrics, logger: logger,
 		tailnetWatchInitialDelay: time.Second, tailnetWatchMaximumDelay: 30 * time.Second,
 	}, nil
 }
 
-func (runner *Runner) Run(ctx context.Context) error {
+func (controller *Controller) Run(ctx context.Context) error {
 	subscriptionContext, cancelSubscription := context.WithCancel(ctx)
-	events, eventErrors, err := runner.networkEvents.Subscribe(subscriptionContext)
+	events, eventErrors, err := controller.networkEvents.Subscribe(subscriptionContext)
 	if err != nil {
 		cancelSubscription()
 		return fmt.Errorf("subscribe to network events: %w", err)
@@ -56,31 +56,31 @@ func (runner *Runner) Run(ctx context.Context) error {
 	triggers := make(chan string, 1)
 	collectorErrors := make(chan error, 1)
 	collectorDone := make(chan struct{})
-	go runner.collectNetworkEvents(subscriptionContext, events, eventErrors, triggers, collectorErrors, collectorDone)
+	go controller.collectNetworkEvents(subscriptionContext, events, eventErrors, triggers, collectorErrors, collectorDone)
 	tailnetCollectorDone := make(chan struct{})
-	go runner.collectTailnetEvents(subscriptionContext, triggers, tailnetCollectorDone)
+	go controller.collectTailnetEvents(subscriptionContext, triggers, tailnetCollectorDone)
 	defer func() {
 		cancelSubscription()
 		<-collectorDone
 		<-tailnetCollectorDone
 	}()
 
-	auditTicker := time.NewTicker(runner.configuration.Runtime.AuditInterval)
+	auditTicker := time.NewTicker(controller.configuration.Runtime.AuditInterval)
 	defer auditTicker.Stop()
-	preferenceTicker := time.NewTicker(runner.configuration.Tailnet.PreferenceAuditInterval)
+	preferenceTicker := time.NewTicker(controller.configuration.Tailnet.PreferenceAuditInterval)
 	defer preferenceTicker.Stop()
 	var capabilityTicker *time.Ticker
 	var capabilityTick <-chan time.Time
-	if runner.configuration.Tailnet.AdvertiseExitNode {
-		capabilityTicker = time.NewTicker(runner.configuration.InternetCapability.ProbeInterval)
+	if controller.configuration.Tailnet.AdvertiseExitNode {
+		capabilityTicker = time.NewTicker(controller.configuration.InternetCapability.ProbeInterval)
 		defer capabilityTicker.Stop()
 		capabilityTick = capabilityTicker.C
 	}
 
 	var dnsTicker *time.Ticker
 	var dnsTick <-chan time.Time
-	if runner.configuration.PacketFilter.LocalEgress.Enabled {
-		dnsTicker = time.NewTicker(runner.configuration.PacketFilter.LocalEgress.RefreshInterval)
+	if controller.configuration.PacketFilter.LocalEgress.Enabled {
+		dnsTicker = time.NewTicker(controller.configuration.PacketFilter.LocalEgress.RefreshInterval)
 		defer dnsTicker.Stop()
 		dnsTick = dnsTicker.C
 	}
@@ -103,14 +103,14 @@ func (runner *Runner) Run(ctx context.Context) error {
 			pendingTrigger = "coalesced"
 		}
 		if debounceTick == nil {
-			resetTimer(debounceTimer, runner.configuration.Runtime.EventDebounce)
+			resetTimer(debounceTimer, controller.configuration.Runtime.EventDebounce)
 			debounceTick = debounceTimer.C
 		}
 	}
 
-	runner.status.MarkDirty()
-	runner.metrics.SetReady(false)
-	retryDelay, retryTick = runner.execute(ctx, "startup", retryTimer, retryDelay)
+	controller.status.MarkDirty()
+	controller.metrics.SetReady(false)
+	retryDelay, retryTick = controller.execute(ctx, "startup", retryTimer, retryDelay)
 
 	for {
 		select {
@@ -126,7 +126,7 @@ func (runner *Runner) Run(ctx context.Context) error {
 			debounceTick = nil
 			trigger := pendingTrigger
 			pendingTrigger = ""
-			retryDelay, retryTick = runner.execute(ctx, trigger, retryTimer, retryDelay)
+			retryDelay, retryTick = controller.execute(ctx, trigger, retryTimer, retryDelay)
 		case <-auditTicker.C:
 			schedule("audit")
 		case <-preferenceTicker.C:
@@ -136,22 +136,22 @@ func (runner *Runner) Run(ctx context.Context) error {
 		case <-dnsTick:
 			schedule("dns_refresh")
 		case <-retryTick:
-			retryDelay, retryTick = runner.execute(ctx, "retry", retryTimer, retryDelay)
+			retryDelay, retryTick = controller.execute(ctx, "retry", retryTimer, retryDelay)
 		}
 	}
 }
 
-func (runner *Runner) collectTailnetEvents(ctx context.Context, triggers chan<- string, done chan<- struct{}) {
+func (controller *Controller) collectTailnetEvents(ctx context.Context, triggers chan<- string, done chan<- struct{}) {
 	defer close(done)
-	retryDelay := runner.tailnetWatchInitialDelay
+	retryDelay := controller.tailnetWatchInitialDelay
 	for ctx.Err() == nil {
-		events, eventErrors, err := runner.tailnetEvents.Subscribe(ctx)
+		events, eventErrors, err := controller.tailnetEvents.Subscribe(ctx)
 		observedEvent := false
 		if err == nil {
 			if events == nil || eventErrors == nil {
 				err = errors.New("tailnet event source returned nil channels")
 			} else {
-				observedEvent, err = runner.consumeTailnetEvents(ctx, events, eventErrors, triggers)
+				observedEvent, err = controller.consumeTailnetEvents(ctx, events, eventErrors, triggers)
 			}
 		}
 		if ctx.Err() != nil {
@@ -161,17 +161,17 @@ func (runner *Runner) collectTailnetEvents(ctx context.Context, triggers chan<- 
 			err = errors.New("tailnet event stream closed unexpectedly")
 		}
 		if observedEvent {
-			retryDelay = runner.tailnetWatchInitialDelay
+			retryDelay = controller.tailnetWatchInitialDelay
 		}
-		runner.logger.WarnContext(ctx, "tailscale event watch unavailable; authoritative polling remains active", "error", err, "retry_in", retryDelay)
+		controller.logger.WarnContext(ctx, "tailscale event watch unavailable; authoritative polling remains active", "error", err, "retry_in", retryDelay)
 		if !waitForTailnetWatchRetry(ctx, retryDelay) {
 			return
 		}
-		retryDelay = nextTailnetWatchDelay(retryDelay, runner.tailnetWatchMaximumDelay)
+		retryDelay = nextTailnetWatchDelay(retryDelay, controller.tailnetWatchMaximumDelay)
 	}
 }
 
-func (runner *Runner) consumeTailnetEvents(ctx context.Context, events <-chan domain.TailnetEvent, eventErrors <-chan error, triggers chan<- string) (bool, error) {
+func (controller *Controller) consumeTailnetEvents(ctx context.Context, events <-chan domain.TailnetEvent, eventErrors <-chan error, triggers chan<- string) (bool, error) {
 	observed := false
 	for events != nil || eventErrors != nil {
 		select {
@@ -186,9 +186,9 @@ func (runner *Runner) consumeTailnetEvents(ctx context.Context, events <-chan do
 				return observed, fmt.Errorf("validate Tailnet event: %w", err)
 			}
 			observed = true
-			runner.status.MarkDirty()
-			runner.metrics.SetReady(false)
-			runner.cancelActiveReconcile()
+			controller.status.MarkDirty()
+			controller.metrics.SetReady(false)
+			controller.cancelActiveReconcile()
 			select {
 			case triggers <- "tailnet_event":
 			default:
@@ -224,7 +224,7 @@ func nextTailnetWatchDelay(current, maximum time.Duration) time.Duration {
 	return current * 2
 }
 
-func (runner *Runner) collectNetworkEvents(ctx context.Context, events <-chan domain.NetworkEvent, eventErrors <-chan error, triggers chan<- string, failures chan<- error, done chan<- struct{}) {
+func (controller *Controller) collectNetworkEvents(ctx context.Context, events <-chan domain.NetworkEvent, eventErrors <-chan error, triggers chan<- string, failures chan<- error, done chan<- struct{}) {
 	defer close(done)
 	for events != nil || eventErrors != nil {
 		select {
@@ -238,9 +238,9 @@ func (runner *Runner) collectNetworkEvents(ctx context.Context, events <-chan do
 				}
 				continue
 			}
-			runner.status.MarkDirty()
-			runner.metrics.SetReady(false)
-			runner.cancelActiveReconcile()
+			controller.status.MarkDirty()
+			controller.metrics.SetReady(false)
+			controller.cancelActiveReconcile()
 			select {
 			case triggers <- "network_event":
 			default:
@@ -265,29 +265,29 @@ func sendFailure(ctx context.Context, failures chan<- error, err error) {
 	}
 }
 
-func (runner *Runner) execute(ctx context.Context, trigger string, retryTimer *time.Timer, retryDelay time.Duration) (time.Duration, <-chan time.Time) {
-	observedEpoch := runner.status.BeginReconcile()
-	runner.metrics.SetReady(runner.status.HealthSnapshot().Ready)
+func (controller *Controller) execute(ctx context.Context, trigger string, retryTimer *time.Timer, retryDelay time.Duration) (time.Duration, <-chan time.Time) {
+	observedEpoch := controller.status.BeginReconcile()
+	controller.metrics.SetReady(controller.status.HealthSnapshot().Ready)
 	started := time.Now()
-	reconcileContext, cancelReconcile := context.WithTimeout(ctx, runner.configuration.Runtime.ReconcileTimeout)
-	runner.setActiveReconcile(cancelReconcile)
-	if !runner.status.isCurrent(observedEpoch) {
+	reconcileContext, cancelReconcile := context.WithTimeout(ctx, controller.configuration.Runtime.ReconcileTimeout)
+	controller.setActiveReconcile(cancelReconcile)
+	if !controller.status.isCurrent(observedEpoch) {
 		cancelReconcile()
 	}
-	report, reconcileErr := runner.controller.Reconcile(reconcileContext)
-	runner.clearActiveReconcile()
+	report, reconcileErr := controller.reconciler.Reconcile(reconcileContext)
+	controller.clearActiveReconcile()
 	cancelReconcile()
 	if reconcileErr == nil {
 		if reportErr := report.Validate(); reportErr != nil {
 			reconcileErr = fmt.Errorf("validate reconciliation report: %w", reportErr)
 		}
 	}
-	// Runtime owns the complete shutdown transaction after parent cancellation.
+	// Supervisor owns the complete shutdown transaction after parent cancellation.
 	// Keeping this pass cancellation-aware transfers ownership immediately when
 	// termination races with live failure handling.
 	if reconcileErr != nil && ctx.Err() == nil {
-		failClosedContext, cancel := context.WithTimeout(ctx, runner.configuration.Runtime.ShutdownTimeout)
-		failClosedReport, failClosedErr := runner.controller.FailClosed(failClosedContext)
+		failClosedContext, cancel := context.WithTimeout(ctx, controller.configuration.Runtime.ShutdownTimeout)
+		failClosedReport, failClosedErr := controller.reconciler.FailClosed(failClosedContext)
 		cancel()
 		report.RoutingWrites += failClosedReport.RoutingWrites
 		report.PacketFilterWrites += failClosedReport.PacketFilterWrites
@@ -297,27 +297,27 @@ func (runner *Runner) execute(ctx context.Context, trigger string, retryTimer *t
 	}
 	duration := time.Since(started)
 	if reconcileErr != nil {
-		runner.status.RecordFailure(time.Now(), reconcileErr)
-		runner.metrics.RecordReconcile(trigger, duration, report, reconcileErr)
-		runner.metrics.SetReady(false)
-		runner.logger.ErrorContext(ctx, "gateway reconciliation failed", "trigger", trigger, "duration", duration, "error", reconcileErr)
+		controller.status.RecordFailure(time.Now(), reconcileErr)
+		controller.metrics.RecordReconcile(trigger, duration, report, reconcileErr)
+		controller.metrics.SetReady(false)
+		controller.logger.ErrorContext(ctx, "gateway reconciliation failed", "trigger", trigger, "duration", duration, "error", reconcileErr)
 		resetTimer(retryTimer, retryDelay)
 		return min(retryDelay*2, 30*time.Second), retryTimer.C
 	}
-	ready := runner.status.RecordSuccess(time.Now(), observedEpoch, report)
-	runner.metrics.RecordReconcile(trigger, duration, report, nil)
-	runner.metrics.SetReady(ready)
+	ready := controller.status.RecordSuccess(time.Now(), observedEpoch, report)
+	controller.metrics.RecordReconcile(trigger, duration, report, nil)
+	controller.metrics.SetReady(ready)
 	// An event can arrive between RecordSuccess and the metric update. Re-read
 	// status after publishing true so either ordering ends with a false gauge.
-	ready = ready && runner.status.HealthSnapshot().Ready
+	ready = ready && controller.status.HealthSnapshot().Ready
 	if !ready {
-		runner.metrics.SetReady(false)
+		controller.metrics.SetReady(false)
 	}
 	for _, condition := range report.Conditions {
-		runner.logger.WarnContext(ctx, "gateway reconciliation has an unmet operational condition",
+		controller.logger.WarnContext(ctx, "gateway reconciliation has an unmet operational condition",
 			"trigger", trigger, "condition", condition.Kind, "family", conditionFamily(condition.Family), "prefix", conditionPrefix(condition.Prefix))
 	}
-	runner.logger.InfoContext(ctx, "gateway reconciliation completed", "trigger", trigger, "duration", duration, "changed", report.Changed, "ready", ready, "conditions", len(report.Conditions), "routing_writes", report.RoutingWrites, "nftables_writes", report.PacketFilterWrites, "tailnet_writes", report.TailnetWrites)
+	controller.logger.InfoContext(ctx, "gateway reconciliation completed", "trigger", trigger, "duration", duration, "changed", report.Changed, "ready", ready, "conditions", len(report.Conditions), "routing_writes", report.RoutingWrites, "nftables_writes", report.PacketFilterWrites, "tailnet_writes", report.TailnetWrites)
 	stopTimer(retryTimer)
 	return time.Second, nil
 }
@@ -340,22 +340,22 @@ func conditionPrefix(prefix netip.Prefix) string {
 	return prefix.String()
 }
 
-func (runner *Runner) setActiveReconcile(cancel context.CancelFunc) {
-	runner.activeMutex.Lock()
-	defer runner.activeMutex.Unlock()
-	runner.activeCancel = cancel
+func (controller *Controller) setActiveReconcile(cancel context.CancelFunc) {
+	controller.activeMutex.Lock()
+	defer controller.activeMutex.Unlock()
+	controller.activeCancel = cancel
 }
 
-func (runner *Runner) clearActiveReconcile() {
-	runner.activeMutex.Lock()
-	defer runner.activeMutex.Unlock()
-	runner.activeCancel = nil
+func (controller *Controller) clearActiveReconcile() {
+	controller.activeMutex.Lock()
+	defer controller.activeMutex.Unlock()
+	controller.activeCancel = nil
 }
 
-func (runner *Runner) cancelActiveReconcile() {
-	runner.activeMutex.Lock()
-	cancel := runner.activeCancel
-	runner.activeMutex.Unlock()
+func (controller *Controller) cancelActiveReconcile() {
+	controller.activeMutex.Lock()
+	cancel := controller.activeCancel
+	controller.activeMutex.Unlock()
 	if cancel != nil {
 		cancel()
 	}
