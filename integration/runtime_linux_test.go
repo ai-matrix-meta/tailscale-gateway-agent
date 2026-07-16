@@ -163,7 +163,7 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 	}
 
 	tailnet.setApprovedRoutes([]netip.Prefix{domain.DefaultPrefix(domain.IPv4), domain.DefaultPrefix(domain.IPv6)})
-	addDummy(t, "runtime-approval-off", nil)
+	addDummy(t, "rt-appr-off", nil)
 	approvalDisabledRecords := metrics.waitForRecord(t, 2, 15*time.Second)
 	approvalDisabled := approvalDisabledRecords[1]
 	wantApprovalCondition := domain.ReconcileCondition{
@@ -180,7 +180,7 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 	}
 
 	tailnet.setApprovedRoutes(domain.NewTailnetExitNodePreferences(configuration.Tailnet.AdvertiseRoutes).AdvertiseRoutes)
-	addDummy(t, "runtime-approval-on", nil)
+	addDummy(t, "rt-appr-on", nil)
 	approvalRestoredRecords := metrics.waitForRecord(t, 3, 15*time.Second)
 	approvalRestored := approvalRestoredRecords[2]
 	if approvalRestored.err != nil || approvalRestored.report.Changed || !approvalRestored.report.DataPlaneAvailable ||
