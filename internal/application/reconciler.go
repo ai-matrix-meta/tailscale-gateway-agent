@@ -13,7 +13,7 @@ import (
 	"github.com/ai-matrix-meta/tailscale-gateway-agent/internal/port"
 )
 
-type ControllerDependencies struct {
+type ReconcilerDependencies struct {
 	Kernel             port.KernelPrerequisiteChecker
 	ProxyTunnel        port.ProxyTunnelDiscovery
 	Network            port.NetworkDiscovery
@@ -30,9 +30,9 @@ type cachedDomainAddresses struct {
 	updatedAt time.Time
 }
 
-type Controller struct {
+type Reconciler struct {
 	configuration domain.Configuration
-	dependencies  ControllerDependencies
+	dependencies  ReconcilerDependencies
 	now           func() time.Time
 
 	addressCache     map[string]cachedDomainAddresses
@@ -42,12 +42,12 @@ type Controller struct {
 	quarantined      bool
 }
 
-func NewController(configuration domain.Configuration, dependencies ControllerDependencies) (*Controller, error) {
+func NewReconciler(configuration domain.Configuration, dependencies ReconcilerDependencies) (*Reconciler, error) {
 	if err := configuration.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid controller configuration: %w", err)
+		return nil, fmt.Errorf("invalid reconciler configuration: %w", err)
 	}
 	if dependencies.Kernel == nil || dependencies.ProxyTunnel == nil || dependencies.Network == nil || dependencies.Routing == nil || dependencies.PacketFilter == nil || dependencies.Resolver == nil || dependencies.Tailnet == nil {
-		return nil, errors.New("all controller dependencies are required")
+		return nil, errors.New("all reconciler dependencies are required")
 	}
 	if configuration.Tailnet.AdvertiseExitNode && dependencies.InternetCapability == nil {
 		return nil, errors.New("internet capability observer is required when Exit advertisement is enabled")
@@ -58,7 +58,7 @@ func NewController(configuration domain.Configuration, dependencies ControllerDe
 	if dependencies.Logger == nil {
 		dependencies.Logger = slog.Default()
 	}
-	return &Controller{
+	return &Reconciler{
 		configuration: configuration,
 		dependencies:  dependencies,
 		now:           time.Now,
@@ -67,34 +67,34 @@ func NewController(configuration domain.Configuration, dependencies ControllerDe
 	}, nil
 }
 
-func (controller *Controller) Prepare(ctx context.Context) error {
-	policy := controller.safetyPacketFilterPolicy()
-	if _, err := controller.reconcilePacketFilter(ctx, policy); err != nil {
+func (reconciler *Reconciler) Prepare(ctx context.Context) error {
+	policy := reconciler.safetyPacketFilterPolicy()
+	if _, err := reconciler.reconcilePacketFilter(ctx, policy); err != nil {
 		return fmt.Errorf("establish forwarding quarantine: %w", err)
 	}
-	controller.lastPacketPolicy = policy
-	controller.hasPacketPolicy = true
-	controller.quarantined = true
-	if _, err := controller.reconcileRouting(ctx, buildSafetyRouting(controller.configuration)); err != nil {
+	reconciler.lastPacketPolicy = policy
+	reconciler.hasPacketPolicy = true
+	reconciler.quarantined = true
+	if _, err := reconciler.reconcileRouting(ctx, buildSafetyRouting(reconciler.configuration)); err != nil {
 		return fmt.Errorf("establish fail-closed routing baseline: %w", err)
 	}
-	if err := controller.dependencies.Kernel.Check(ctx); err != nil {
+	if err := reconciler.dependencies.Kernel.Check(ctx); err != nil {
 		return fmt.Errorf("verify kernel prerequisites: %w", err)
 	}
-	if !controller.configuration.PacketFilter.LocalEgress.Enabled {
+	if !reconciler.configuration.PacketFilter.LocalEgress.Enabled {
 		return nil
 	}
 
-	resolverSnapshot, err := controller.dependencies.Resolver.Snapshot(ctx)
+	resolverSnapshot, err := reconciler.dependencies.Resolver.Snapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("read DNS resolver snapshot: %w", err)
 	}
-	localEgressAddresses, err := controller.resolveLocalEgress(ctx, resolverSnapshot)
+	localEgressAddresses, err := reconciler.resolveLocalEgress(ctx, resolverSnapshot)
 	if err != nil {
 		return fmt.Errorf("prepare local control-plane destinations: %w", err)
 	}
-	proxyTunnelLink, err := controller.dependencies.ProxyTunnel.DiscoverProxyTunnel(ctx, domain.ProxyTunnelDiscoveryRequest{
-		Addresses: slices.Clone(controller.configuration.Network.ProxyTunnelAddresses),
+	proxyTunnelLink, err := reconciler.dependencies.ProxyTunnel.DiscoverProxyTunnel(ctx, domain.ProxyTunnelDiscoveryRequest{
+		Addresses: slices.Clone(reconciler.configuration.Network.ProxyTunnelAddresses),
 	})
 	if err != nil {
 		return fmt.Errorf("discover proxy tunnel before managed process startup: %w", err)
@@ -102,24 +102,24 @@ func (controller *Controller) Prepare(ctx context.Context) error {
 	if err := proxyTunnelLink.Validate(); err != nil {
 		return fmt.Errorf("validate proxy tunnel before managed process startup: %w", err)
 	}
-	if _, err := controller.reconcileRouting(ctx, buildPreparedRouting(controller.configuration, proxyTunnelLink)); err != nil {
+	if _, err := reconciler.reconcileRouting(ctx, buildPreparedRouting(reconciler.configuration, proxyTunnelLink)); err != nil {
 		return fmt.Errorf("prepare local control-plane routing: %w", err)
 	}
-	policy = controller.packetFilterPolicy(domain.NetworkSnapshot{}, localEgressAddresses, true)
-	if _, err := controller.reconcilePacketFilter(ctx, policy); err != nil {
+	policy = reconciler.packetFilterPolicy(domain.NetworkSnapshot{}, localEgressAddresses, true)
+	if _, err := reconciler.reconcilePacketFilter(ctx, policy); err != nil {
 		return fmt.Errorf("prepare local control-plane packet marking: %w", err)
 	}
-	controller.lastPacketPolicy = policy
+	reconciler.lastPacketPolicy = policy
 	return nil
 }
 
-func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileReport, error) {
+func (reconciler *Reconciler) Reconcile(ctx context.Context) (domain.ReconcileReport, error) {
 	report := domain.ReconcileReport{}
 	disabledPreferences := domain.NewTailnetPreferences(nil)
-	if err := controller.dependencies.Kernel.Check(ctx); err != nil {
+	if err := reconciler.dependencies.Kernel.Check(ctx); err != nil {
 		return report, fmt.Errorf("verify kernel prerequisites: %w", err)
 	}
-	tailnetState, err := controller.readTailnetState(ctx)
+	tailnetState, err := reconciler.readTailnetState(ctx)
 	if err != nil {
 		return report, err
 	}
@@ -132,8 +132,8 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 	if len(tailnetState.SelfAddresses) == 0 {
 		return report, errors.New("tailscale backend reported no self addresses")
 	}
-	if controller.quarantined && !tailnetState.Preferences.Equal(disabledPreferences) {
-		verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, disabledPreferences)
+	if reconciler.quarantined && !tailnetState.Preferences.Equal(disabledPreferences) {
+		verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, disabledPreferences)
 		if writeErr != nil {
 			return report, fmt.Errorf("clear restored Tailscale advertisements: %w", writeErr)
 		}
@@ -142,7 +142,7 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 		tailnetState = verifiedState
 	}
 
-	resolverSnapshot, err := controller.dependencies.Resolver.Snapshot(ctx)
+	resolverSnapshot, err := reconciler.dependencies.Resolver.Snapshot(ctx)
 	if err != nil {
 		return report, fmt.Errorf("read DNS resolver snapshot: %w", err)
 	}
@@ -150,54 +150,54 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 	if len(nameServers) == 0 {
 		return report, errors.New("resolver configuration contains no usable nameservers")
 	}
-	localEgressAddresses, err := controller.resolveLocalEgress(ctx, resolverSnapshot)
+	localEgressAddresses, err := reconciler.resolveLocalEgress(ctx, resolverSnapshot)
 	if err != nil {
 		return report, err
 	}
 	request := domain.DiscoveryRequest{
 		TailnetAddresses:     normalizeAddresses(tailnetState.SelfAddresses),
-		ProxyTunnelAddresses: slices.Clone(controller.configuration.Network.ProxyTunnelAddresses),
-		AdvertisedPrefixes:   slices.Clone(controller.configuration.Tailnet.AdvertiseRoutes),
+		ProxyTunnelAddresses: slices.Clone(reconciler.configuration.Network.ProxyTunnelAddresses),
+		AdvertisedPrefixes:   slices.Clone(reconciler.configuration.Tailnet.AdvertiseRoutes),
 		NameServers:          slices.Clone(nameServers),
 	}
 	if err := request.Validate(); err != nil {
 		return report, fmt.Errorf("build network discovery request: %w", err)
 	}
-	snapshot, err := controller.dependencies.Network.Discover(ctx, request)
+	snapshot, err := reconciler.dependencies.Network.Discover(ctx, request)
 	if err != nil {
 		return report, fmt.Errorf("discover network state: %w", err)
 	}
 	if err := snapshot.Validate(request); err != nil {
 		return report, fmt.Errorf("validate network discovery: %w", err)
 	}
-	controller.lastTailnetLink = snapshot.TailnetLink
+	reconciler.lastTailnetLink = snapshot.TailnetLink
 
 	activeExitDefaultRoutes := domain.ExitDefaultRouteSet{}
-	if controller.configuration.Tailnet.AdvertiseExitNode {
-		capabilitySnapshot, capabilityErr := controller.dependencies.InternetCapability.Observe(ctx, snapshot.ProxyTunnelLink)
+	if reconciler.configuration.Tailnet.AdvertiseExitNode {
+		capabilitySnapshot, capabilityErr := reconciler.dependencies.InternetCapability.Observe(ctx, snapshot.ProxyTunnelLink)
 		if capabilityErr != nil {
 			return report, fmt.Errorf("observe Internet capability: %w", capabilityErr)
 		}
-		evaluation, evaluationErr := evaluateInternetCapability(capabilitySnapshot, snapshot.ProxyTunnelLink, controller.now())
+		evaluation, evaluationErr := evaluateInternetCapability(capabilitySnapshot, snapshot.ProxyTunnelLink, reconciler.now())
 		if evaluationErr != nil {
 			return report, evaluationErr
 		}
 		report.Conditions = append(report.Conditions, evaluation.conditions...)
 		activeExitDefaultRoutes = evaluation.activeExitDefaultRoutes
 	}
-	desiredRouting := buildDesiredRouting(controller.configuration, snapshot, activeExitDefaultRoutes)
-	desiredPolicy := controller.packetFilterPolicy(snapshot, localEgressAddresses, false)
-	desiredPreferences := domain.NewTailnetPreferences(controller.configuration.Tailnet.AdvertiseRoutes)
+	desiredRouting := buildDesiredRouting(reconciler.configuration, snapshot, activeExitDefaultRoutes)
+	desiredPolicy := reconciler.packetFilterPolicy(snapshot, localEgressAddresses, false)
+	desiredPreferences := domain.NewTailnetPreferences(reconciler.configuration.Tailnet.AdvertiseRoutes)
 	if !activeExitDefaultRoutes.Empty() {
-		desiredPreferences = domain.NewTailnetExitNodePreferences(controller.configuration.Tailnet.AdvertiseRoutes)
+		desiredPreferences = domain.NewTailnetExitNodePreferences(reconciler.configuration.Tailnet.AdvertiseRoutes)
 	}
 	nonExitPreferencesMatch := slices.Equal(tailnetState.Preferences.RoutesWithoutExitDefaults(), desiredPreferences.RoutesWithoutExitDefaults())
-	routingChanges, err := controller.planRouting(ctx, desiredRouting)
+	routingChanges, err := reconciler.planRouting(ctx, desiredRouting)
 	if err != nil {
 		return report, err
 	}
-	exitDefaultTransition, onlyExitDefaultRoutesChanged := classifyExitDefaultRouteTransition(routingChanges, controller.configuration.Network)
-	packetFilterObservation, err := controller.observePacketFilter(ctx, desiredPolicy)
+	exitDefaultTransition, onlyExitDefaultRoutesChanged := classifyExitDefaultRouteTransition(routingChanges, reconciler.configuration.Network)
+	packetFilterObservation, err := reconciler.observePacketFilter(ctx, desiredPolicy)
 	if err != nil {
 		return report, err
 	}
@@ -206,10 +206,10 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 			return report, err
 		}
 		if !tailnetState.Preferences.Equal(desiredPreferences) {
-			if err := controller.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
+			if err := reconciler.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
 				return report, err
 			}
-			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
+			verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
 			if writeErr != nil {
 				return report, fmt.Errorf("publish Tailscale advertisements after final data-plane verification: %w", writeErr)
 			}
@@ -217,17 +217,17 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 			report.Changed = true
 			tailnetState = verifiedState
 		}
-		controller.lastPacketPolicy = desiredPolicy
-		controller.hasPacketPolicy = true
-		controller.quarantined = false
-		controller.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
+		reconciler.lastPacketPolicy = desiredPolicy
+		reconciler.hasPacketPolicy = true
+		reconciler.quarantined = false
+		reconciler.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
 		return report, nil
 	}
 	isolatedExitDefaultTransition := nonExitPreferencesMatch && onlyExitDefaultRoutesChanged &&
 		packetFilterObservation.Matches(desiredPolicy)
 	if isolatedExitDefaultTransition {
 		if !desiredPreferences.AdvertisesExitNode() && tailnetState.Preferences.HasExitDefaultRoutes() {
-			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
+			verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
 			if writeErr != nil {
 				return report, fmt.Errorf("withdraw Exit Node advertisement before deactivating its final route: %w", writeErr)
 			}
@@ -235,7 +235,7 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 			report.Changed = true
 			tailnetState = verifiedState
 		}
-		routingWrites, applyErr := controller.applyExitDefaultRouteTransition(
+		routingWrites, applyErr := reconciler.applyExitDefaultRouteTransition(
 			ctx, desiredRouting, exitDefaultTransition,
 		)
 		report.RoutingWrites += routingWrites
@@ -243,14 +243,14 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 		if applyErr != nil {
 			return report, applyErr
 		}
-		if err := controller.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
+		if err := reconciler.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
 			return report, err
 		}
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
 		if !tailnetState.Preferences.Equal(desiredPreferences) {
-			verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
+			verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
 			if writeErr != nil {
 				return report, fmt.Errorf("publish atomic Exit Node advertisement after route verification: %w", writeErr)
 			}
@@ -258,27 +258,27 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 			report.Changed = true
 			tailnetState = verifiedState
 		}
-		controller.lastPacketPolicy = desiredPolicy
-		controller.hasPacketPolicy = true
-		controller.quarantined = false
-		controller.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
+		reconciler.lastPacketPolicy = desiredPolicy
+		reconciler.hasPacketPolicy = true
+		reconciler.quarantined = false
+		reconciler.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
 		return report, nil
 	}
 
 	closedPolicy := desiredPolicy
 	closedPolicy.GateClosed = true
-	packetFilterWrites, err := controller.reconcilePacketFilter(ctx, closedPolicy)
+	packetFilterWrites, err := reconciler.reconcilePacketFilter(ctx, closedPolicy)
 	report.PacketFilterWrites += packetFilterWrites
 	report.Changed = report.Changed || packetFilterWrites > 0
 	if err != nil {
 		return report, fmt.Errorf("close forwarding gate before applying drift: %w", err)
 	}
-	controller.lastPacketPolicy = closedPolicy
-	controller.hasPacketPolicy = true
-	controller.quarantined = true
+	reconciler.lastPacketPolicy = closedPolicy
+	reconciler.hasPacketPolicy = true
+	reconciler.quarantined = true
 
 	if !tailnetState.Preferences.Equal(disabledPreferences) {
-		verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, disabledPreferences)
+		verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, disabledPreferences)
 		if writeErr != nil {
 			return report, fmt.Errorf("clear Tailscale advertisements before applying drift: %w", writeErr)
 		}
@@ -287,26 +287,26 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 		tailnetState = verifiedState
 	}
 
-	routingWrites, err := controller.applyRoutingPlan(ctx, desiredRouting, routingChanges)
+	routingWrites, err := reconciler.applyRoutingPlan(ctx, desiredRouting, routingChanges)
 	report.RoutingWrites += routingWrites
 	report.Changed = report.Changed || routingWrites > 0
 	if err != nil {
 		return report, err
 	}
-	packetFilterWrites, err = controller.reconcilePacketFilter(ctx, desiredPolicy)
+	packetFilterWrites, err = reconciler.reconcilePacketFilter(ctx, desiredPolicy)
 	report.PacketFilterWrites += packetFilterWrites
 	report.Changed = report.Changed || packetFilterWrites > 0
 	if err != nil {
 		return report, fmt.Errorf("open forwarding gate after convergence: %w", err)
 	}
-	if err := controller.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
+	if err := reconciler.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
 		return report, err
 	}
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
 	if !tailnetState.Preferences.Equal(desiredPreferences) {
-		verifiedState, writeErr := controller.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
+		verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
 		if writeErr != nil {
 			return report, fmt.Errorf("publish Tailscale advertisements: %w", writeErr)
 		}
@@ -314,7 +314,7 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 		report.Changed = true
 		tailnetState = verifiedState
 	} else {
-		tailnetState, err = controller.readTailnetState(ctx)
+		tailnetState, err = reconciler.readTailnetState(ctx)
 		if err != nil {
 			return report, fmt.Errorf("refresh Tailscale approval after data-plane convergence: %w", err)
 		}
@@ -322,31 +322,31 @@ func (controller *Controller) Reconcile(ctx context.Context) (domain.ReconcileRe
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
-	controller.lastPacketPolicy = desiredPolicy
-	controller.hasPacketPolicy = true
-	controller.quarantined = false
-	controller.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
+	reconciler.lastPacketPolicy = desiredPolicy
+	reconciler.hasPacketPolicy = true
+	reconciler.quarantined = false
+	reconciler.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
 	return report, nil
 }
 
-func (controller *Controller) applyExitDefaultRouteTransition(
+func (reconciler *Reconciler) applyExitDefaultRouteTransition(
 	ctx context.Context,
 	desiredRouting domain.RoutingState,
 	transition exitDefaultRouteTransition,
 ) (int, error) {
 	writes := 0
 	if !transition.deactivationChanges.Empty() {
-		deactivationWrites, err := controller.applyRoutingChanges(ctx, transition.deactivationChanges)
+		deactivationWrites, err := reconciler.applyRoutingChanges(ctx, transition.deactivationChanges)
 		writes += deactivationWrites
 		if err != nil {
 			return writes, fmt.Errorf("deactivate unavailable Exit default routes: %w", err)
 		}
-		if err := controller.verifyPendingRoutingChanges(ctx, desiredRouting, transition.activationChanges); err != nil {
+		if err := reconciler.verifyPendingRoutingChanges(ctx, desiredRouting, transition.activationChanges); err != nil {
 			return writes, fmt.Errorf("verify Exit default route deactivation: %w", err)
 		}
 	}
 	if !transition.activationChanges.Empty() {
-		activationWrites, err := controller.applyRoutingPlan(ctx, desiredRouting, transition.activationChanges)
+		activationWrites, err := reconciler.applyRoutingPlan(ctx, desiredRouting, transition.activationChanges)
 		writes += activationWrites
 		if err != nil {
 			return writes, fmt.Errorf("activate available Exit default routes: %w", err)
@@ -355,23 +355,23 @@ func (controller *Controller) applyExitDefaultRouteTransition(
 	return writes, nil
 }
 
-func (controller *Controller) FailClosed(ctx context.Context) (domain.ReconcileReport, error) {
-	return controller.failClosed(ctx, true)
+func (reconciler *Reconciler) FailClosed(ctx context.Context) (domain.ReconcileReport, error) {
+	return reconciler.failClosed(ctx, true)
 }
 
-func (controller *Controller) failClosed(ctx context.Context, retainLocalControlEgress bool) (domain.ReconcileReport, error) {
+func (reconciler *Reconciler) failClosed(ctx context.Context, retainLocalControlEgress bool) (domain.ReconcileReport, error) {
 	report := domain.ReconcileReport{}
-	policy := controller.safetyPacketFilterPolicy()
-	if controller.hasPacketPolicy {
-		policy = controller.lastPacketPolicy
+	policy := reconciler.safetyPacketFilterPolicy()
+	if reconciler.hasPacketPolicy {
+		policy = reconciler.lastPacketPolicy
 		policy.GateClosed = true
 	}
 	defer func() {
-		controller.lastPacketPolicy = policy
-		controller.hasPacketPolicy = true
-		controller.quarantined = true
+		reconciler.lastPacketPolicy = policy
+		reconciler.hasPacketPolicy = true
+		reconciler.quarantined = true
 	}()
-	writes, packetFilterErr := controller.reconcilePacketFilter(ctx, policy)
+	writes, packetFilterErr := reconciler.reconcilePacketFilter(ctx, policy)
 	report.PacketFilterWrites += writes
 	report.Changed = writes > 0
 	if cancellationErr := ctx.Err(); cancellationErr != nil {
@@ -381,16 +381,16 @@ func (controller *Controller) failClosed(ctx context.Context, retainLocalControl
 		)
 	}
 
-	strictRouting := buildFailClosedRouting(controller.configuration, controller.lastTailnetLink, domain.LinkIdentity{})
+	strictRouting := buildFailClosedRouting(reconciler.configuration, reconciler.lastTailnetLink, domain.LinkIdentity{})
 	desiredRouting := strictRouting
 	var recoveryStateErr error
 	var recoveryPolicyErr error
 	recoveryReady := false
-	if retainLocalControlEgress && controller.configuration.PacketFilter.LocalEgress.Enabled && packetFilterErr == nil {
+	if retainLocalControlEgress && reconciler.configuration.PacketFilter.LocalEgress.Enabled && packetFilterErr == nil {
 		var recoveryPolicy domain.PacketFilterPolicy
-		desiredRouting, recoveryPolicy, recoveryStateErr = controller.liveFailClosedState(ctx)
+		desiredRouting, recoveryPolicy, recoveryStateErr = reconciler.liveFailClosedState(ctx)
 		if recoveryStateErr == nil {
-			writes, recoveryPolicyErr = controller.reconcilePacketFilter(ctx, recoveryPolicy)
+			writes, recoveryPolicyErr = reconciler.reconcilePacketFilter(ctx, recoveryPolicy)
 			report.PacketFilterWrites += writes
 			report.Changed = report.Changed || writes > 0
 			if recoveryPolicyErr == nil {
@@ -404,18 +404,18 @@ func (controller *Controller) failClosed(ctx context.Context, retainLocalControl
 		}
 	}
 
-	routingWrites, routingErr := controller.reconcileRouting(ctx, desiredRouting)
+	routingWrites, routingErr := reconciler.reconcileRouting(ctx, desiredRouting)
 	report.RoutingWrites += routingWrites
 	report.Changed = report.Changed || routingWrites > 0
 	if routingErr == nil && recoveryReady {
-		if err := controller.verifyRouting(ctx, desiredRouting); err != nil {
+		if err := reconciler.verifyRouting(ctx, desiredRouting); err != nil {
 			routingErr = fmt.Errorf("verify local control-plane recovery routing: %w", err)
-		} else if err := controller.dependencies.Kernel.Check(ctx); err != nil {
+		} else if err := reconciler.dependencies.Kernel.Check(ctx); err != nil {
 			routingErr = fmt.Errorf("reverify kernel prerequisites for local control-plane recovery: %w", err)
 		}
 	}
 	if routingErr != nil && recoveryReady {
-		fallbackWrites, fallbackErr := controller.reconcileRouting(ctx, strictRouting)
+		fallbackWrites, fallbackErr := reconciler.reconcileRouting(ctx, strictRouting)
 		report.RoutingWrites += fallbackWrites
 		report.Changed = report.Changed || fallbackWrites > 0
 		routingErr = errors.Join(routingErr, wrapOptional("restore strict fail-closed routing after recovery-path failure", fallbackErr))
@@ -430,12 +430,12 @@ func (controller *Controller) failClosed(ctx context.Context, retainLocalControl
 		)
 	}
 
-	tailnetState, readErr := controller.readTailnetState(ctx)
+	tailnetState, readErr := reconciler.readTailnetState(ctx)
 	var preferenceErr error
 	if readErr == nil {
 		disabled := domain.NewTailnetPreferences(nil)
 		if !tailnetState.Preferences.Equal(disabled) {
-			_, preferenceErr = controller.writeAndVerifyTailnetPreferences(ctx, disabled)
+			_, preferenceErr = reconciler.writeAndVerifyTailnetPreferences(ctx, disabled)
 			if preferenceErr == nil {
 				report.TailnetWrites++
 				report.Changed = true
@@ -452,20 +452,20 @@ func (controller *Controller) failClosed(ctx context.Context, retainLocalControl
 	)
 }
 
-func (controller *Controller) liveFailClosedState(ctx context.Context) (domain.RoutingState, domain.PacketFilterPolicy, error) {
-	if err := controller.dependencies.Kernel.Check(ctx); err != nil {
+func (reconciler *Reconciler) liveFailClosedState(ctx context.Context) (domain.RoutingState, domain.PacketFilterPolicy, error) {
+	if err := reconciler.dependencies.Kernel.Check(ctx); err != nil {
 		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("verify kernel prerequisites: %w", err)
 	}
-	resolverSnapshot, err := controller.dependencies.Resolver.Snapshot(ctx)
+	resolverSnapshot, err := reconciler.dependencies.Resolver.Snapshot(ctx)
 	if err != nil {
 		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("read DNS resolver snapshot: %w", err)
 	}
-	localEgressAddresses, err := controller.resolveLocalEgress(ctx, resolverSnapshot)
+	localEgressAddresses, err := reconciler.resolveLocalEgress(ctx, resolverSnapshot)
 	if err != nil {
 		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("resolve local control-plane destinations: %w", err)
 	}
-	proxyTunnelLink, err := controller.dependencies.ProxyTunnel.DiscoverProxyTunnel(ctx, domain.ProxyTunnelDiscoveryRequest{
-		Addresses: slices.Clone(controller.configuration.Network.ProxyTunnelAddresses),
+	proxyTunnelLink, err := reconciler.dependencies.ProxyTunnel.DiscoverProxyTunnel(ctx, domain.ProxyTunnelDiscoveryRequest{
+		Addresses: slices.Clone(reconciler.configuration.Network.ProxyTunnelAddresses),
 	})
 	if err != nil {
 		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("discover proxy tunnel: %w", err)
@@ -473,26 +473,26 @@ func (controller *Controller) liveFailClosedState(ctx context.Context) (domain.R
 	if err := proxyTunnelLink.Validate(); err != nil {
 		return domain.RoutingState{}, domain.PacketFilterPolicy{}, fmt.Errorf("validate proxy tunnel: %w", err)
 	}
-	return buildFailClosedRouting(controller.configuration, controller.lastTailnetLink, proxyTunnelLink),
-		controller.packetFilterPolicy(domain.NetworkSnapshot{}, localEgressAddresses, true), nil
+	return buildFailClosedRouting(reconciler.configuration, reconciler.lastTailnetLink, proxyTunnelLink),
+		reconciler.packetFilterPolicy(domain.NetworkSnapshot{}, localEgressAddresses, true), nil
 }
 
-func (controller *Controller) Shutdown(ctx context.Context) error {
-	_, err := controller.failClosed(ctx, false)
+func (reconciler *Reconciler) Shutdown(ctx context.Context) error {
+	_, err := reconciler.failClosed(ctx, false)
 	return err
 }
 
-func (controller *Controller) reconcileRouting(ctx context.Context, desired domain.RoutingState) (int, error) {
-	changes, err := controller.planRouting(ctx, desired)
+func (reconciler *Reconciler) reconcileRouting(ctx context.Context, desired domain.RoutingState) (int, error) {
+	changes, err := reconciler.planRouting(ctx, desired)
 	if err != nil {
 		return 0, err
 	}
-	return controller.applyRoutingPlan(ctx, desired, changes)
+	return reconciler.applyRoutingPlan(ctx, desired, changes)
 }
 
-func (controller *Controller) planRouting(ctx context.Context, desired domain.RoutingState) (domain.RoutingChanges, error) {
-	ownership := routingOwnership(controller.configuration)
-	observed, err := controller.dependencies.Routing.ReadRouting(ctx, ownership)
+func (reconciler *Reconciler) planRouting(ctx context.Context, desired domain.RoutingState) (domain.RoutingChanges, error) {
+	ownership := routingOwnership(reconciler.configuration)
+	observed, err := reconciler.dependencies.Routing.ReadRouting(ctx, ownership)
 	if err != nil {
 		return domain.RoutingChanges{}, fmt.Errorf("read managed routing state: %w", err)
 	}
@@ -503,33 +503,33 @@ func (controller *Controller) planRouting(ctx context.Context, desired domain.Ro
 	return changes, nil
 }
 
-func (controller *Controller) applyRoutingPlan(ctx context.Context, desired domain.RoutingState, changes domain.RoutingChanges) (int, error) {
+func (reconciler *Reconciler) applyRoutingPlan(ctx context.Context, desired domain.RoutingState, changes domain.RoutingChanges) (int, error) {
 	if changes.Empty() {
 		return 0, nil
 	}
-	writes, err := controller.applyRoutingChanges(ctx, changes)
+	writes, err := reconciler.applyRoutingChanges(ctx, changes)
 	if err != nil {
 		return writes, err
 	}
-	if err := controller.verifyRouting(ctx, desired); err != nil {
+	if err := reconciler.verifyRouting(ctx, desired); err != nil {
 		return writes, err
 	}
 	return writes, nil
 }
 
-func (controller *Controller) applyRoutingChanges(ctx context.Context, changes domain.RoutingChanges) (int, error) {
+func (reconciler *Reconciler) applyRoutingChanges(ctx context.Context, changes domain.RoutingChanges) (int, error) {
 	if changes.Empty() {
 		return 0, nil
 	}
-	writes, err := controller.dependencies.Routing.ApplyRouting(ctx, changes)
+	writes, err := reconciler.dependencies.Routing.ApplyRouting(ctx, changes)
 	if err != nil {
 		return writes, fmt.Errorf("apply managed routing state: %w", err)
 	}
 	return writes, nil
 }
 
-func (controller *Controller) verifyPendingRoutingChanges(ctx context.Context, desired domain.RoutingState, expected domain.RoutingChanges) error {
-	remaining, err := controller.planRouting(ctx, desired)
+func (reconciler *Reconciler) verifyPendingRoutingChanges(ctx context.Context, desired domain.RoutingState, expected domain.RoutingChanges) error {
+	remaining, err := reconciler.planRouting(ctx, desired)
 	if err != nil {
 		return err
 	}
@@ -539,9 +539,9 @@ func (controller *Controller) verifyPendingRoutingChanges(ctx context.Context, d
 	return nil
 }
 
-func (controller *Controller) verifyRouting(ctx context.Context, desired domain.RoutingState) error {
-	ownership := routingOwnership(controller.configuration)
-	verified, err := controller.dependencies.Routing.ReadRouting(ctx, ownership)
+func (reconciler *Reconciler) verifyRouting(ctx context.Context, desired domain.RoutingState) error {
+	ownership := routingOwnership(reconciler.configuration)
+	verified, err := reconciler.dependencies.Routing.ReadRouting(ctx, ownership)
 	if err != nil {
 		return fmt.Errorf("verify managed routing state: %w", err)
 	}
@@ -555,18 +555,18 @@ func (controller *Controller) verifyRouting(ctx context.Context, desired domain.
 	return nil
 }
 
-func (controller *Controller) reconcilePacketFilter(ctx context.Context, policy domain.PacketFilterPolicy) (int, error) {
-	observation, err := controller.observePacketFilter(ctx, policy)
+func (reconciler *Reconciler) reconcilePacketFilter(ctx context.Context, policy domain.PacketFilterPolicy) (int, error) {
+	observation, err := reconciler.observePacketFilter(ctx, policy)
 	if err != nil {
 		return 0, err
 	}
 	if observation.Matches(policy) {
 		return 0, nil
 	}
-	if err := controller.dependencies.PacketFilter.Apply(ctx, policy, observation); err != nil {
+	if err := reconciler.dependencies.PacketFilter.Apply(ctx, policy, observation); err != nil {
 		return 0, fmt.Errorf("apply managed nftables state: %w", err)
 	}
-	verified, err := controller.observePacketFilter(ctx, policy)
+	verified, err := reconciler.observePacketFilter(ctx, policy)
 	if err != nil {
 		return 1, fmt.Errorf("verify managed nftables state: %w", err)
 	}
@@ -576,44 +576,44 @@ func (controller *Controller) reconcilePacketFilter(ctx context.Context, policy 
 	return 1, nil
 }
 
-func (controller *Controller) observePacketFilter(ctx context.Context, policy domain.PacketFilterPolicy) (domain.PacketFilterObservation, error) {
+func (reconciler *Reconciler) observePacketFilter(ctx context.Context, policy domain.PacketFilterPolicy) (domain.PacketFilterObservation, error) {
 	if err := policy.Validate(); err != nil {
 		return domain.PacketFilterObservation{}, fmt.Errorf("validate desired nftables policy: %w", err)
 	}
-	observation, err := controller.dependencies.PacketFilter.Observe(ctx, policy)
+	observation, err := reconciler.dependencies.PacketFilter.Observe(ctx, policy)
 	if err != nil {
 		return domain.PacketFilterObservation{}, fmt.Errorf("observe managed nftables state: %w", err)
 	}
 	return observation, nil
 }
 
-func (controller *Controller) verifyDataPlane(ctx context.Context, routing domain.RoutingState, policy domain.PacketFilterPolicy) error {
-	if err := controller.verifyRouting(ctx, routing); err != nil {
+func (reconciler *Reconciler) verifyDataPlane(ctx context.Context, routing domain.RoutingState, policy domain.PacketFilterPolicy) error {
+	if err := reconciler.verifyRouting(ctx, routing); err != nil {
 		return fmt.Errorf("final routing verification: %w", err)
 	}
-	observation, err := controller.observePacketFilter(ctx, policy)
+	observation, err := reconciler.observePacketFilter(ctx, policy)
 	if err != nil {
 		return fmt.Errorf("final nftables verification: %w", err)
 	}
 	if !observation.Matches(policy) {
 		return errors.New("final nftables verification observed drift")
 	}
-	if err := controller.dependencies.Kernel.Check(ctx); err != nil {
+	if err := reconciler.dependencies.Kernel.Check(ctx); err != nil {
 		return fmt.Errorf("final kernel prerequisite verification: %w", err)
 	}
 	return nil
 }
 
-func (controller *Controller) resolveLocalEgress(ctx context.Context, resolver port.DNSResolverSnapshot) (domain.ResolvedAddresses, error) {
-	configuration := controller.configuration.PacketFilter.LocalEgress
+func (reconciler *Reconciler) resolveLocalEgress(ctx context.Context, resolver port.DNSResolverSnapshot) (domain.ResolvedAddresses, error) {
+	configuration := reconciler.configuration.PacketFilter.LocalEgress
 	if !configuration.Enabled {
 		return domain.ResolvedAddresses{}, nil
 	}
-	now := controller.now()
+	now := reconciler.now()
 	var combined []netip.Addr
 	var resolutionErrors []error
 	for _, domainName := range configuration.Domains {
-		cached, exists := controller.addressCache[domainName]
+		cached, exists := reconciler.addressCache[domainName]
 		refreshDue := !exists || now.Sub(cached.updatedAt) >= configuration.RefreshInterval
 		if refreshDue {
 			addresses, err := resolver.Resolve(ctx, domainName)
@@ -623,13 +623,13 @@ func (controller *Controller) resolveLocalEgress(ctx context.Context, resolver p
 			}
 			if err == nil && !resolved.Empty() {
 				cached = cachedDomainAddresses{addresses: resolved, updatedAt: now}
-				controller.addressCache[domainName] = cached
+				reconciler.addressCache[domainName] = cached
 				exists = true
 			} else if !exists || now.Sub(cached.updatedAt) > configuration.MaximumStaleness {
 				resolutionErrors = append(resolutionErrors, fmt.Errorf("resolve %s: %w", domainName, err))
 				continue
 			} else {
-				controller.dependencies.Logger.WarnContext(ctx, "DNS resolution failed; retaining last-known-good addresses", "domain", domainName, "last_success", cached.updatedAt, "error", err)
+				reconciler.dependencies.Logger.WarnContext(ctx, "DNS resolution failed; retaining last-known-good addresses", "domain", domainName, "last_success", cached.updatedAt, "error", err)
 			}
 		}
 		if exists {
@@ -646,8 +646,8 @@ func (controller *Controller) resolveLocalEgress(ctx context.Context, resolver p
 	return resolved, nil
 }
 
-func (controller *Controller) safetyPacketFilterPolicy() domain.PacketFilterPolicy {
-	configuration := controller.configuration
+func (reconciler *Reconciler) safetyPacketFilterPolicy() domain.PacketFilterPolicy {
+	configuration := reconciler.configuration
 	return domain.PacketFilterPolicy{
 		FilterTable:        configuration.PacketFilter.FilterTable,
 		ForwardGuardChain:  configuration.PacketFilter.ForwardGuardChain,
@@ -662,30 +662,30 @@ func (controller *Controller) safetyPacketFilterPolicy() domain.PacketFilterPoli
 	}
 }
 
-func (controller *Controller) packetFilterPolicy(snapshot domain.NetworkSnapshot, addresses domain.ResolvedAddresses, gateClosed bool) domain.PacketFilterPolicy {
-	policy := controller.safetyPacketFilterPolicy()
+func (reconciler *Reconciler) packetFilterPolicy(snapshot domain.NetworkSnapshot, addresses domain.ResolvedAddresses, gateClosed bool) domain.PacketFilterPolicy {
+	policy := reconciler.safetyPacketFilterPolicy()
 	policy.GateClosed = gateClosed
 	for _, path := range snapshot.DNSEgressPaths {
 		policy.DNSTargets = append(policy.DNSTargets, domain.DNSSNATTarget{Address: path.NameServer, OutputInterface: path.Link.Name})
 	}
-	if !controller.configuration.PacketFilter.LocalEgress.Enabled {
+	if !reconciler.configuration.PacketFilter.LocalEgress.Enabled {
 		return policy
 	}
 	policy.LocalEgress = domain.LocalEgressPolicy{
-		Enabled:   controller.configuration.PacketFilter.LocalEgress.Enabled,
+		Enabled:   reconciler.configuration.PacketFilter.LocalEgress.Enabled,
 		IPv4:      slices.Clone(addresses.IPv4),
 		IPv6:      slices.Clone(addresses.IPv6),
-		Protocols: slices.Clone(controller.configuration.PacketFilter.LocalEgress.Protocols),
-		Ports:     slices.Clone(controller.configuration.PacketFilter.LocalEgress.Ports),
-		Mark:      controller.configuration.Network.LocalEgressPacketMark,
+		Protocols: slices.Clone(reconciler.configuration.PacketFilter.LocalEgress.Protocols),
+		Ports:     slices.Clone(reconciler.configuration.PacketFilter.LocalEgress.Ports),
+		Mark:      reconciler.configuration.Network.LocalEgressPacketMark,
 	}
 	return policy
 }
 
-func (controller *Controller) readTailnetState(ctx context.Context) (domain.TailnetState, error) {
-	operationContext, cancel := context.WithTimeout(ctx, controller.configuration.Tailnet.OperationTimeout)
+func (reconciler *Reconciler) readTailnetState(ctx context.Context) (domain.TailnetState, error) {
+	operationContext, cancel := context.WithTimeout(ctx, reconciler.configuration.Tailnet.OperationTimeout)
 	defer cancel()
-	state, err := controller.dependencies.Tailnet.ReadState(operationContext)
+	state, err := reconciler.dependencies.Tailnet.ReadState(operationContext)
 	if err != nil {
 		return domain.TailnetState{}, fmt.Errorf("read Tailscale state: %w", err)
 	}
@@ -707,8 +707,8 @@ func (controller *Controller) readTailnetState(ctx context.Context) (domain.Tail
 	if !state.Control.AllowedIPsAvailable {
 		return domain.TailnetState{}, errors.New("tailscale self AllowedIPs is unavailable")
 	}
-	observationAge := controller.now().Sub(state.Control.ObservedAt)
-	if observationAge < 0 || observationAge > controller.configuration.Tailnet.PreferenceAuditInterval {
+	observationAge := reconciler.now().Sub(state.Control.ObservedAt)
+	if observationAge < 0 || observationAge > reconciler.configuration.Tailnet.PreferenceAuditInterval {
 		return domain.TailnetState{}, fmt.Errorf("tailscale control observation age %s is outside the freshness window", observationAge)
 	}
 	for _, address := range state.SelfAddresses {
@@ -734,20 +734,20 @@ func (controller *Controller) readTailnetState(ctx context.Context) (domain.Tail
 	return state, nil
 }
 
-func (controller *Controller) writeTailnetPreferences(ctx context.Context, preferences domain.TailnetPreferences) error {
+func (reconciler *Reconciler) writeTailnetPreferences(ctx context.Context, preferences domain.TailnetPreferences) error {
 	if err := preferences.Validate(); err != nil {
 		return fmt.Errorf("validate Tailscale preferences: %w", err)
 	}
-	operationContext, cancel := context.WithTimeout(ctx, controller.configuration.Tailnet.OperationTimeout)
+	operationContext, cancel := context.WithTimeout(ctx, reconciler.configuration.Tailnet.OperationTimeout)
 	defer cancel()
-	return controller.dependencies.Tailnet.WritePreferences(operationContext, preferences)
+	return reconciler.dependencies.Tailnet.WritePreferences(operationContext, preferences)
 }
 
-func (controller *Controller) writeAndVerifyTailnetPreferences(ctx context.Context, preferences domain.TailnetPreferences) (domain.TailnetState, error) {
-	if err := controller.writeTailnetPreferences(ctx, preferences); err != nil {
+func (reconciler *Reconciler) writeAndVerifyTailnetPreferences(ctx context.Context, preferences domain.TailnetPreferences) (domain.TailnetState, error) {
+	if err := reconciler.writeTailnetPreferences(ctx, preferences); err != nil {
 		return domain.TailnetState{}, err
 	}
-	state, err := controller.readTailnetState(ctx)
+	state, err := reconciler.readTailnetState(ctx)
 	if err != nil {
 		return domain.TailnetState{}, fmt.Errorf("verify Tailscale preferences: %w", err)
 	}
@@ -757,7 +757,7 @@ func (controller *Controller) writeAndVerifyTailnetPreferences(ctx context.Conte
 	return state, nil
 }
 
-func (controller *Controller) recordRouteApprovals(report *domain.ReconcileReport, state domain.TailnetState, desired domain.TailnetPreferences) {
+func (reconciler *Reconciler) recordRouteApprovals(report *domain.ReconcileReport, state domain.TailnetState, desired domain.TailnetPreferences) {
 	approved := make(map[netip.Prefix]struct{}, len(state.Control.ApprovedRoutes))
 	for _, prefix := range state.Control.ApprovedRoutes {
 		approved[prefix] = struct{}{}
@@ -775,14 +775,14 @@ func (controller *Controller) recordRouteApprovals(report *domain.ReconcileRepor
 	}
 }
 
-func (controller *Controller) completeReconcileReport(
+func (reconciler *Reconciler) completeReconcileReport(
 	report *domain.ReconcileReport,
 	state domain.TailnetState,
 	desired domain.TailnetPreferences,
 	activeExitDefaultRoutes domain.ExitDefaultRouteSet,
 ) {
-	controller.recordRouteApprovals(report, state, desired)
-	report.DataPlaneAvailable = !controller.configuration.Tailnet.AdvertiseExitNode || !activeExitDefaultRoutes.Empty()
+	reconciler.recordRouteApprovals(report, state, desired)
+	report.DataPlaneAvailable = !reconciler.configuration.Tailnet.AdvertiseExitNode || !activeExitDefaultRoutes.Empty()
 }
 
 func normalizeAddresses(values []netip.Addr) []netip.Addr {

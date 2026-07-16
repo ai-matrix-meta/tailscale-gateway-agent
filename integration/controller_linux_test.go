@@ -32,11 +32,11 @@ const (
 	integrationLocalEgressRulePriority = 31_981
 	integrationActiveRouteMetric       = 123
 	integrationFailClosedRouteMetric   = 32_123
-	integrationFilterTable             = "ts_gateway_runtime_filter"
-	integrationNATTable                = "ts_gateway_runtime_nat"
+	integrationFilterTable             = "ts_gateway_controller_filter"
+	integrationNATTable                = "ts_gateway_controller_nat"
 )
 
-func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *testing.T) {
+func TestControllerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *testing.T) {
 	if err := purgeManagedRouting(); err != nil {
 		t.Fatalf("remove stale managed routing: %v", err)
 	}
@@ -52,10 +52,10 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 		}
 	})
 
-	addTunnel(t, "runtime-tail", []string{"100.64.0.8/32", "fd7a:115c:a1e0::8/128"})
-	addTunnel(t, "runtime-proxy", []string{"198.18.0.1/15", "fd88:baba:fafa::1/126"})
-	ipv4Link := addDummy(t, "runtime-v4", []string{"10.42.80.2/24"})
-	addDummy(t, "runtime-v6", []string{"fd00:80::2/64"})
+	addTunnel(t, "controller-tail", []string{"100.64.0.8/32", "fd7a:115c:a1e0::8/128"})
+	addTunnel(t, "controller-proxy", []string{"198.18.0.1/15", "fd88:baba:fafa::1/126"})
+	ipv4Link := addDummy(t, "controller-v4", []string{"10.42.80.2/24"})
+	addDummy(t, "controller-v6", []string{"fd00:80::2/64"})
 	advertisedPrefix := netip.MustParsePrefix("10.80.0.0/24")
 	advertisedRoute := &vnetlink.Route{
 		LinkIndex: ipv4Link.Attrs().Index,
@@ -93,7 +93,7 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 		},
 	}}
 	internetCapability := &mutableInternetCapability{activeExitDefaultRoutes: domain.ExitDefaultRouteSet{IPv4: true}}
-	controller, err := application.NewController(configuration, application.ControllerDependencies{
+	reconciler, err := application.NewReconciler(configuration, application.ReconcilerDependencies{
 		Kernel: staticKernelChecker{}, ProxyTunnel: network, Network: network, Routing: network,
 		PacketFilter: nftablesadapter.New(), Resolver: resolver, Tailnet: tailnet,
 		InternetCapability: internetCapability,
@@ -101,16 +101,16 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Prepare(context.Background()); err != nil {
-		t.Fatalf("prepare controller: %v", err)
+	if err := reconciler.Prepare(context.Background()); err != nil {
+		t.Fatalf("prepare reconciler: %v", err)
 	}
 	tailnet.mutex.Lock()
 	tailnet.state.Control.InNetworkMap = false
 	tailnet.mutex.Unlock()
-	if _, err := controller.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
+	if _, err := reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
 		t.Fatalf("unavailable bootstrap state was accepted: %v", err)
 	}
-	failClosedReport, err := controller.FailClosed(context.Background())
+	failClosedReport, err := reconciler.FailClosed(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
 		t.Fatalf("live fail-closed state did not report unavailable Tailnet control: %v", err)
 	}
@@ -125,17 +125,17 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 
 	status := application.NewStatus(configuration.Runtime.ReadinessMaximumAge)
 	metrics := newRecordingMetrics()
-	runner, err := application.NewRunner(configuration, controller, network, tailnet, status, metrics, nil)
+	controller, err := application.NewController(configuration, reconciler, network, tailnet, status, metrics, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	runnerResult := make(chan error, 1)
-	go func() { runnerResult <- runner.Run(ctx) }()
+	controllerResult := make(chan error, 1)
+	go func() { controllerResult <- controller.Run(ctx) }()
 	defer func() {
 		cancel()
-		if err := <-runnerResult; err != nil {
-			t.Errorf("stop runner: %v", err)
+		if err := <-controllerResult; err != nil {
+			t.Errorf("stop controller: %v", err)
 		}
 	}()
 
@@ -190,7 +190,7 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 	}
 
 	internetCapability.setActiveExitDefaultRoutes(domain.ExitDefaultRouteSet{IPv6: true})
-	addDummy(t, "runtime-cap-v6", nil)
+	addDummy(t, "controller-cap-v6", nil)
 	transitionRecords := metrics.waitForRecord(t, 4, 15*time.Second)
 	transition := transitionRecords[3]
 	if transition.err != nil || transition.report.RoutingWrites == 0 || transition.report.PacketFilterWrites != 0 || transition.report.TailnetWrites != 0 {
@@ -206,7 +206,7 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 	assertManagedExitDefaultRouting(t, network, configuration, domain.ExitDefaultRouteSet{IPv6: true})
 
 	internetCapability.setActiveExitDefaultRoutes(domain.AllExitDefaultRoutes())
-	addDummy(t, "runtime-cap-all", nil)
+	addDummy(t, "controller-cap-all", nil)
 	recoveryRecords := metrics.waitForRecord(t, 5, 15*time.Second)
 	recovery := recoveryRecords[4]
 	if recovery.err != nil || recovery.report.RoutingWrites == 0 || recovery.report.PacketFilterWrites != 0 || recovery.report.TailnetWrites != 0 || len(recovery.report.Conditions) != 0 {
@@ -230,7 +230,7 @@ func TestRunnerConvergesAtomicExitNodeTransitionsAndRepairsExternalDrift(t *test
 	}
 	_ = findManagedIPv4Default(t)
 
-	addDummy(t, "runtime-noise", nil)
+	addDummy(t, "controller-noise", nil)
 	steadyRecords := metrics.waitForRecord(t, 7, 15*time.Second)
 	steady := steadyRecords[6]
 	if steady.err != nil || steady.report.Changed || !steady.report.DataPlaneAvailable || steady.report.RoutingWrites != 0 || steady.report.PacketFilterWrites != 0 || steady.report.TailnetWrites != 0 {
@@ -262,7 +262,7 @@ func assertLocalControlRecoveryRouting(t *testing.T, store port.RoutingStore, co
 			}
 			switch {
 			case route.Table == configuration.Network.LocalEgressRouteTable && route.Disposition == domain.RouteUnicast:
-				localActive = route.Link.Valid() && route.Link.Name == "runtime-proxy"
+				localActive = route.Link.Valid() && route.Link.Name == "controller-proxy"
 			case route.Table == configuration.Network.LocalEgressRouteTable && route.Disposition == domain.RouteBlackhole:
 				localBlackhole = true
 			case route.Table == configuration.Network.ExitRouteTable && route.Disposition == domain.RouteBlackhole:
@@ -296,7 +296,7 @@ func assertManagedExitDefaultRouting(t *testing.T, store port.RoutingStore, conf
 			switch route.Disposition {
 			case domain.RouteUnicast:
 				activeRouteCount++
-				if route.Link.Name != "runtime-proxy" || route.Metric != configuration.Network.ActiveRouteMetric {
+				if route.Link.Name != "controller-proxy" || route.Metric != configuration.Network.ActiveRouteMetric {
 					t.Fatalf("family %d has an invalid active Exit default: %#v", family, route)
 				}
 			case domain.RouteBlackhole:
@@ -339,12 +339,12 @@ func integrationConfiguration(advertisedPrefix netip.Prefix) domain.Configuratio
 	configuration.Network.ActiveRouteMetric = integrationActiveRouteMetric
 	configuration.Network.FailClosedRouteMetric = integrationFailClosedRouteMetric
 	configuration.PacketFilter.FilterTable = integrationFilterTable
-	configuration.PacketFilter.ForwardGuardChain = "runtime_forward_guard"
-	configuration.PacketFilter.LocalEgressChain = "runtime_local_egress"
-	configuration.PacketFilter.LocalEgressIPv4Set = "runtime_local_ipv4"
-	configuration.PacketFilter.LocalEgressIPv6Set = "runtime_local_ipv6"
+	configuration.PacketFilter.ForwardGuardChain = "controller_forward_guard"
+	configuration.PacketFilter.LocalEgressChain = "controller_local_egress"
+	configuration.PacketFilter.LocalEgressIPv4Set = "controller_local_ipv4"
+	configuration.PacketFilter.LocalEgressIPv6Set = "controller_local_ipv6"
 	configuration.PacketFilter.NATTable = integrationNATTable
-	configuration.PacketFilter.DNSMasqueradeChain = "runtime_dns_snat"
+	configuration.PacketFilter.DNSMasqueradeChain = "controller_dns_snat"
 	configuration.PacketFilter.LocalEgress.Enabled = true
 	configuration.PacketFilter.LocalEgress.Domains = []string{"control.example.com"}
 	configuration.Tailnet.AdvertiseRoutes = []netip.Prefix{advertisedPrefix}

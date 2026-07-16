@@ -81,7 +81,7 @@ func TestDesiredRoutingKeepsUnavailableExitFamiliesBlackholed(t *testing.T) {
 	}
 }
 
-func TestControllerPublishesAtomicExitNodeAdvertisementWhenAnyFamilyIsAvailable(t *testing.T) {
+func TestReconcilerPublishesAtomicExitNodeAdvertisementWhenAnyFamilyIsAvailable(t *testing.T) {
 	tests := []struct {
 		name                       string
 		availableExitDefaultRoutes domain.ExitDefaultRouteSet
@@ -92,13 +92,13 @@ func TestControllerPublishesAtomicExitNodeAdvertisementWhenAnyFamilyIsAvailable(
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newControllerFixture(t)
+			fixture := newReconcilerFixture(t)
 			now := time.Now()
 			fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(fixture.discovery.snapshot.ProxyTunnelLink, now, test.availableExitDefaultRoutes))
-			if err := fixture.controller.Prepare(context.Background()); err != nil {
+			if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			report, err := fixture.controller.Reconcile(context.Background())
+			report, err := fixture.reconciler.Reconcile(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -130,16 +130,16 @@ func TestControllerPublishesAtomicExitNodeAdvertisementWhenAnyFamilyIsAvailable(
 	}
 }
 
-func TestControllerClearsRestoredAdvertisementsBeforeOpeningDataPlane(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestReconcilerClearsRestoredAdvertisementsBeforeOpeningDataPlane(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	desiredPreferences := domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes)
 	fixture.tailnet.state.Preferences = desiredPreferences
 
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.recorder.reset()
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,12 +152,12 @@ func TestControllerClearsRestoredAdvertisementsBeforeOpeningDataPlane(t *testing
 	}
 }
 
-func TestControllerNoDriftProducesStrictlyZeroWrites(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerNoDriftProducesStrictlyZeroWrites(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.routing.resetWrites()
@@ -165,7 +165,7 @@ func TestControllerNoDriftProducesStrictlyZeroWrites(t *testing.T) {
 	fixture.tailnet.resetWrites()
 	fixture.recorder.reset()
 
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,18 +180,18 @@ func TestControllerNoDriftProducesStrictlyZeroWrites(t *testing.T) {
 	}
 }
 
-func TestControllerDisabledLocalEgressProducesCanonicalPolicy(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestReconcilerDisabledLocalEgressProducesCanonicalPolicy(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	fixture.configuration.PacketFilter.LocalEgress.Enabled = false
 	fixture.configuration.PacketFilter.LocalEgress.Domains = nil
-	fixture.controller.configuration = fixture.configuration
+	fixture.reconciler.configuration = fixture.configuration
 	if err := fixture.configuration.Validate(); err != nil {
 		t.Fatalf("disabled local-egress configuration was rejected: %v", err)
 	}
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatalf("disabled local-egress reconciliation failed: %v", err)
 	}
 
@@ -201,18 +201,18 @@ func TestControllerDisabledLocalEgressProducesCanonicalPolicy(t *testing.T) {
 	}
 }
 
-func TestControllerReportsRouteApprovalLossAndRecoveryWithoutPreferenceWrites(t *testing.T) {
+func TestReconcilerReportsRouteApprovalLossAndRecoveryWithoutPreferenceWrites(t *testing.T) {
 	for _, missing := range []netip.Prefix{
 		netip.MustParsePrefix("10.0.8.0/24"),
 		domain.DefaultPrefix(domain.IPv4),
 		domain.DefaultPrefix(domain.IPv6),
 	} {
 		t.Run(missing.String(), func(t *testing.T) {
-			fixture := newControllerFixture(t)
-			if err := fixture.controller.Prepare(context.Background()); err != nil {
+			fixture := newReconcilerFixture(t)
+			if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if report, err := fixture.controller.Reconcile(context.Background()); err != nil || len(report.Conditions) != 0 {
+			if report, err := fixture.reconciler.Reconcile(context.Background()); err != nil || len(report.Conditions) != 0 {
 				t.Fatalf("initial approved reconciliation failed: report=%#v err=%v", report, err)
 			}
 			fixture.tailnet.resetWrites()
@@ -221,7 +221,7 @@ func TestControllerReportsRouteApprovalLossAndRecoveryWithoutPreferenceWrites(t 
 				func(prefix netip.Prefix) bool { return prefix == missing },
 			))
 
-			report, err := fixture.controller.Reconcile(context.Background())
+			report, err := fixture.reconciler.Reconcile(context.Background())
 			if err != nil {
 				t.Fatalf("explicit non-approval became a technical error: %v", err)
 			}
@@ -237,7 +237,7 @@ func TestControllerReportsRouteApprovalLossAndRecoveryWithoutPreferenceWrites(t 
 			}
 
 			fixture.tailnet.setApprovedRoutes(domain.NewTailnetExitNodePreferences(fixture.configuration.Tailnet.AdvertiseRoutes).AdvertiseRoutes)
-			recovered, err := fixture.controller.Reconcile(context.Background())
+			recovered, err := fixture.reconciler.Reconcile(context.Background())
 			if err != nil || len(recovered.Conditions) != 0 || !recovered.ApprovalObserved {
 				t.Fatalf("approval recovery did not become healthy: report=%#v err=%v", recovered, err)
 			}
@@ -248,14 +248,14 @@ func TestControllerReportsRouteApprovalLossAndRecoveryWithoutPreferenceWrites(t 
 	}
 }
 
-func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
+func TestReconcilerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 	for _, unavailableFamily := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
 		t.Run(fmt.Sprintf("ipv%d", unavailableFamily), func(t *testing.T) {
-			fixture := newControllerFixture(t)
-			if err := fixture.controller.Prepare(context.Background()); err != nil {
+			fixture := newReconcilerFixture(t)
+			if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+			if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 
@@ -280,7 +280,7 @@ func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 			fixture.routing.recordReads = true
 			fixture.packetFilter.recordReads = true
 			fixture.capability.set(snapshot)
-			lost, err := fixture.controller.Reconcile(context.Background())
+			lost, err := fixture.reconciler.Reconcile(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -328,7 +328,7 @@ func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 			fixture.packetFilter.resetWrites()
 			fixture.recorder.reset()
 			fixture.capability.set(domain.InternetCapabilitySnapshot{ProxyLink: link, IPv4: fresh, IPv6: fresh})
-			recovered, err := fixture.controller.Reconcile(context.Background())
+			recovered, err := fixture.reconciler.Reconcile(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -354,17 +354,17 @@ func TestControllerIsolatesSingleFamilyCapabilityLossAndRecovery(t *testing.T) {
 	}
 }
 
-func TestControllerWithdrawsAtomicExitNodeAdvertisementBeforeDeactivatingFinalRoute(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestReconcilerWithdrawsAtomicExitNodeAdvertisementBeforeDeactivatingFinalRoute(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(
 		fixture.discovery.snapshot.ProxyTunnelLink,
 		time.Now(),
 		domain.ExitDefaultRouteSet{IPv4: true},
 	))
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -380,7 +380,7 @@ func TestControllerWithdrawsAtomicExitNodeAdvertisementBeforeDeactivatingFinalRo
 		domain.ExitDefaultRouteSet{},
 	))
 
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,14 +414,14 @@ func TestControllerWithdrawsAtomicExitNodeAdvertisementBeforeDeactivatingFinalRo
 	}
 }
 
-func TestControllerPublishesAtomicExitNodeAdvertisementAfterFirstActiveRouteVerification(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestReconcilerPublishesAtomicExitNodeAdvertisementAfterFirstActiveRouteVerification(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	link := fixture.discovery.snapshot.ProxyTunnelLink
 	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{}))
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if fixture.tailnet.currentPreferences().HasExitDefaultRoutes() {
@@ -436,7 +436,7 @@ func TestControllerPublishesAtomicExitNodeAdvertisementAfterFirstActiveRouteVeri
 	fixture.packetFilter.recordReads = true
 	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv4: true}))
 
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,14 +472,14 @@ func TestControllerPublishesAtomicExitNodeAdvertisementAfterFirstActiveRouteVeri
 	}
 }
 
-func TestControllerMigratesPartialDefaultAdvertisementToAtomicExitNodeContract(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestReconcilerMigratesPartialDefaultAdvertisementToAtomicExitNodeContract(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	link := fixture.discovery.snapshot.ProxyTunnelLink
 	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv4: true}))
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	partialRoutes := append(slices.Clone(fixture.configuration.Tailnet.AdvertiseRoutes), domain.DefaultPrefix(domain.IPv4))
@@ -492,7 +492,7 @@ func TestControllerMigratesPartialDefaultAdvertisementToAtomicExitNodeContract(t
 	fixture.routing.recordReads = true
 	fixture.packetFilter.recordReads = true
 
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,19 +514,19 @@ func TestControllerMigratesPartialDefaultAdvertisementToAtomicExitNodeContract(t
 	}
 }
 
-func TestControllerTransitionsBetweenSingleFamilyExitRoutesWithoutGlobalQuarantine(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerTransitionsBetweenSingleFamilyExitRoutesWithoutGlobalQuarantine(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	now := time.Now()
 	link := fixture.discovery.snapshot.ProxyTunnelLink
 	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, now, domain.ExitDefaultRouteSet{IPv4: true}))
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.routing.injectObservedRoute(activeRoute(
@@ -546,7 +546,7 @@ func TestControllerTransitionsBetweenSingleFamilyExitRoutesWithoutGlobalQuaranti
 	fixture.routing.recordReads = true
 	fixture.packetFilter.recordReads = true
 	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv6: true}))
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,14 +588,14 @@ func TestControllerTransitionsBetweenSingleFamilyExitRoutesWithoutGlobalQuaranti
 	}
 }
 
-func TestControllerStopsCrossFamilyActivationAfterUnexpectedDeactivationReadback(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestReconcilerStopsCrossFamilyActivationAfterUnexpectedDeactivationReadback(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	link := fixture.discovery.snapshot.ProxyTunnelLink
 	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv4: true}))
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -614,7 +614,7 @@ func TestControllerStopsCrossFamilyActivationAfterUnexpectedDeactivationReadback
 	})
 	fixture.capability.set(capabilitySnapshotForActiveExitDefaultRoutes(link, time.Now(), domain.ExitDefaultRouteSet{IPv6: true}))
 
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "unexpected pending changes") {
 		t.Fatalf("unexpected deactivation readback did not stop activation: report=%#v err=%v", report, err)
 	}
@@ -635,12 +635,12 @@ func TestControllerStopsCrossFamilyActivationAfterUnexpectedDeactivationReadback
 	}
 }
 
-func TestControllerUsesGlobalQuarantineWhenCapabilityChangeCoincidesWithUnrelatedDrift(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerUsesGlobalQuarantineWhenCapabilityChangeCoincidesWithUnrelatedDrift(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -657,7 +657,7 @@ func TestControllerUsesGlobalQuarantineWhenCapabilityChangeCoincidesWithUnrelate
 		domain.ExitDefaultRouteSet{IPv4: true},
 	))
 
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,12 +680,12 @@ func TestControllerUsesGlobalQuarantineWhenCapabilityChangeCoincidesWithUnrelate
 	}
 }
 
-func TestControllerUsesOneGlobalTransactionWhenFinalCapabilityLossCoincidesWithUnrelatedDrift(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerUsesOneGlobalTransactionWhenFinalCapabilityLossCoincidesWithUnrelatedDrift(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -702,7 +702,7 @@ func TestControllerUsesOneGlobalTransactionWhenFinalCapabilityLossCoincidesWithU
 		domain.ExitDefaultRouteSet{},
 	))
 
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,7 +730,7 @@ func TestControllerUsesOneGlobalTransactionWhenFinalCapabilityLossCoincidesWithU
 	}
 }
 
-func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *testing.T) {
+func TestReconcilerReconcilesOperationalCapabilityStatesPerAddressFamily(t *testing.T) {
 	tests := []struct {
 		name                            string
 		snapshot                        func(domain.LinkIdentity, time.Time) domain.InternetCapabilitySnapshot
@@ -795,11 +795,11 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newControllerFixture(t)
-			if err := fixture.controller.Prepare(context.Background()); err != nil {
+			fixture := newReconcilerFixture(t)
+			if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+			if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			fixture.tailnet.resetWrites()
@@ -808,7 +808,7 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 			fixture.recorder.reset()
 			fixture.capability.set(test.snapshot(fixture.discovery.snapshot.ProxyTunnelLink, time.Now()))
 
-			reconciled, err := fixture.controller.Reconcile(context.Background())
+			reconciled, err := fixture.reconciler.Reconcile(context.Background())
 			if err != nil {
 				t.Fatalf("operational capability state became a technical error: %v", err)
 			}
@@ -842,7 +842,7 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 			fixture.routing.resetWrites()
 			fixture.packetFilter.resetWrites()
 			fixture.recorder.reset()
-			steady, err := fixture.controller.Reconcile(context.Background())
+			steady, err := fixture.reconciler.Reconcile(context.Background())
 			if err != nil || steady.Changed || steady.TailnetWrites != 0 || steady.RoutingWrites != 0 || steady.PacketFilterWrites != 0 ||
 				fixture.tailnet.writeCalls() != 0 || fixture.routing.writeCalls() != 0 || fixture.packetFilter.writeCalls() != 0 {
 				t.Fatalf("steady capability state repeated writes: report=%#v tailnet=%d routing=%d nftables=%d err=%v", steady, fixture.tailnet.writeCalls(), fixture.routing.writeCalls(), fixture.packetFilter.writeCalls(), err)
@@ -851,7 +851,7 @@ func TestControllerReconcilesOperationalCapabilityStatesPerAddressFamily(t *test
 	}
 }
 
-func TestControllerRejectsUnavailableTailnetControlObservations(t *testing.T) {
+func TestReconcilerRejectsUnavailableTailnetControlObservations(t *testing.T) {
 	tests := []struct {
 		name     string
 		mutate   func(*domain.TailnetControlObservation)
@@ -876,9 +876,9 @@ func TestControllerRejectsUnavailableTailnetControlObservations(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newControllerFixture(t)
+			fixture := newReconcilerFixture(t)
 			test.mutate(&fixture.tailnet.state.Control)
-			if _, err := fixture.controller.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), test.fragment) {
+			if _, err := fixture.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), test.fragment) {
 				t.Fatalf("expected %q error, got %v", test.fragment, err)
 			}
 			if fixture.tailnet.writeCalls() != 0 {
@@ -888,13 +888,13 @@ func TestControllerRejectsUnavailableTailnetControlObservations(t *testing.T) {
 	}
 }
 
-func TestControllerUsesOneResolverSnapshotPerReconcile(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerUsesOneResolverSnapshotPerReconcile(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.resolver.snapshots = 0
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if fixture.resolver.snapshots != 1 {
@@ -902,12 +902,12 @@ func TestControllerUsesOneResolverSnapshotPerReconcile(t *testing.T) {
 	}
 }
 
-func TestControllerRouteChangeIsQuarantinedBeforeApplyingDifferences(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerRouteChangeIsQuarantinedBeforeApplyingDifferences(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.routing.resetWrites()
@@ -917,7 +917,7 @@ func TestControllerRouteChangeIsQuarantinedBeforeApplyingDifferences(t *testing.
 
 	fixture.discovery.snapshot.AdvertisedRoutes[0].Link = domain.LinkIdentity{Index: 14, Name: "internal-next"}
 	fixture.discovery.snapshot.DNSEgressPaths[0].Link = domain.LinkIdentity{Index: 15, Name: "dns-v4-next"}
-	report, err := fixture.controller.Reconcile(context.Background())
+	report, err := fixture.reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -934,9 +934,9 @@ func TestControllerRouteChangeIsQuarantinedBeforeApplyingDifferences(t *testing.
 	}
 }
 
-func TestControllerPrepareRoutesLocalControlTrafficBeforeManagedProcessStartup(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerPrepareRoutesLocalControlTrafficBeforeManagedProcessStartup(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	state := fixture.routing.currentState()
@@ -956,9 +956,9 @@ func TestControllerPrepareRoutesLocalControlTrafficBeforeManagedProcessStartup(t
 	}
 }
 
-func TestControllerPrepareClosesForwardingBeforeRoutingMutations(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerPrepareClosesForwardingBeforeRoutingMutations(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	operations := fixture.recorder.snapshot()
@@ -969,17 +969,17 @@ func TestControllerPrepareClosesForwardingBeforeRoutingMutations(t *testing.T) {
 	}
 }
 
-func TestControllerPrepareRejectsInvalidProxyTunnelIdentity(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestReconcilerPrepareRejectsInvalidProxyTunnelIdentity(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	fixture.discovery.snapshot.ProxyTunnelLink = domain.LinkIdentity{Index: 3, Name: "invalid:name"}
-	if err := fixture.controller.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "validate proxy tunnel") {
+	if err := fixture.reconciler.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "validate proxy tunnel") {
 		t.Fatalf("invalid startup proxy tunnel identity was accepted: %v", err)
 	}
 }
 
-func TestControllerLiveFailClosedRetainsVerifiedLocalControlEgressDuringTailnetBootstrap(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerLiveFailClosedRetainsVerifiedLocalControlEgressDuringTailnetBootstrap(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.recorder.reset()
@@ -987,10 +987,10 @@ func TestControllerLiveFailClosedRetainsVerifiedLocalControlEgressDuringTailnetB
 	fixture.tailnet.state.Control.InNetworkMap = false
 	fixture.tailnet.mutex.Unlock()
 
-	if _, err := fixture.controller.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
 		t.Fatalf("unavailable bootstrap state was accepted: %v", err)
 	}
-	report, err := fixture.controller.FailClosed(context.Background())
+	report, err := fixture.reconciler.FailClosed(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "absent from the current network map") {
 		t.Fatalf("live fail-closed state did not report unavailable Tailnet control: %v", err)
 	}
@@ -1017,35 +1017,35 @@ func TestControllerLiveFailClosedRetainsVerifiedLocalControlEgressDuringTailnetB
 	fixture.tailnet.state.Control.InNetworkMap = true
 	fixture.tailnet.state.Control.ObservedAt = time.Now()
 	fixture.tailnet.mutex.Unlock()
-	if recovered, err := fixture.controller.Reconcile(context.Background()); err != nil || len(recovered.Conditions) != 0 {
+	if recovered, err := fixture.reconciler.Reconcile(context.Background()); err != nil || len(recovered.Conditions) != 0 {
 		t.Fatalf("Tailnet bootstrap did not recover through the retained control path: report=%#v err=%v", recovered, err)
 	}
 }
 
-func TestControllerLiveFailClosedBlackholesUnverifiedLocalControlEgress(t *testing.T) {
+func TestReconcilerLiveFailClosedBlackholesUnverifiedLocalControlEgress(t *testing.T) {
 	tests := []struct {
 		name              string
-		breakRecoveryPath func(*controllerFixture)
+		breakRecoveryPath func(*reconcilerFixture)
 	}{
-		{name: "kernel", breakRecoveryPath: func(fixture *controllerFixture) {
+		{name: "kernel", breakRecoveryPath: func(fixture *reconcilerFixture) {
 			fixture.kernel.err = errors.New("kernel prerequisites unavailable")
 		}},
-		{name: "resolver", breakRecoveryPath: func(fixture *controllerFixture) {
+		{name: "resolver", breakRecoveryPath: func(fixture *reconcilerFixture) {
 			fixture.resolver.err = errors.New("resolver snapshot unavailable")
 		}},
-		{name: "proxy tunnel", breakRecoveryPath: func(fixture *controllerFixture) {
+		{name: "proxy tunnel", breakRecoveryPath: func(fixture *reconcilerFixture) {
 			fixture.discovery.err = errors.New("proxy tunnel is ambiguous")
 		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newControllerFixture(t)
-			if err := fixture.controller.Prepare(context.Background()); err != nil {
+			fixture := newReconcilerFixture(t)
+			if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			test.breakRecoveryPath(fixture)
 
-			report, err := fixture.controller.FailClosed(context.Background())
+			report, err := fixture.reconciler.FailClosed(context.Background())
 			if err == nil || !strings.Contains(err.Error(), "verify local control-plane recovery path") {
 				t.Fatalf("unverified recovery path was not reported: %v", err)
 			}
@@ -1065,14 +1065,14 @@ func TestControllerLiveFailClosedBlackholesUnverifiedLocalControlEgress(t *testi
 	}
 }
 
-func TestControllerLiveFailClosedRestoresStrictRoutingAfterFinalKernelFailure(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerLiveFailClosedRestoresStrictRoutingAfterFinalKernelFailure(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.kernel.failOnCheck(2, errors.New("kernel prerequisites drifted after recovery convergence"))
 
-	report, err := fixture.controller.FailClosed(context.Background())
+	report, err := fixture.reconciler.FailClosed(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "reverify kernel prerequisites for local control-plane recovery") {
 		t.Fatalf("final recovery-path failure was not reported: %v", err)
 	}
@@ -1091,15 +1091,15 @@ func TestControllerLiveFailClosedRestoresStrictRoutingAfterFinalKernelFailure(t 
 	}
 }
 
-func TestControllerShutdownAlwaysBlackholesLocalControlEgress(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerShutdownAlwaysBlackholesLocalControlEgress(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.kernel.err = errors.New("kernel recovery check must not run during shutdown")
 	fixture.resolver.err = errors.New("resolver recovery check must not run during shutdown")
 	fixture.discovery.err = errors.New("proxy recovery check must not run during shutdown")
-	if err := fixture.controller.Shutdown(context.Background()); err != nil {
+	if err := fixture.reconciler.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	state := fixture.routing.currentState()
@@ -1113,20 +1113,20 @@ func TestControllerShutdownAlwaysBlackholesLocalControlEgress(t *testing.T) {
 	}
 }
 
-func TestControllerDiscoveryFailureClosesGateBeforeClearingAdvertisements(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerDiscoveryFailureClosesGateBeforeClearingAdvertisements(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.recorder.reset()
 	fixture.discovery.err = errors.New("kernel route is no longer deterministic")
-	if _, err := fixture.controller.Reconcile(context.Background()); err == nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err == nil {
 		t.Fatal("discovery failure was accepted")
 	}
-	if _, err := fixture.controller.FailClosed(context.Background()); err == nil || !strings.Contains(err.Error(), "verify local control-plane recovery path") {
+	if _, err := fixture.reconciler.FailClosed(context.Background()); err == nil || !strings.Contains(err.Error(), "verify local control-plane recovery path") {
 		t.Fatalf("unverified recovery path was not reported: %v", err)
 	}
 	if got := fixture.recorder.snapshot(); !slices.Equal(got, []string{"nftables-closed", "routing", "advertisements-cleared"}) {
@@ -1165,29 +1165,29 @@ func TestRecoverableFailClosedRoutingKeepsExitClosedAndLocalControlOnVerifiedPro
 	}
 }
 
-func TestControllerRejectsForwardingDrift(t *testing.T) {
-	fixture := newControllerFixture(t)
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+func TestReconcilerRejectsForwardingDrift(t *testing.T) {
+	fixture := newReconcilerFixture(t)
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.controller.Reconcile(context.Background()); err != nil {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.kernel.mutex.Lock()
 	fixture.kernel.err = errors.New("IPv6 forwarding is disabled")
 	fixture.kernel.mutex.Unlock()
-	if _, err := fixture.controller.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "IPv6 forwarding") {
+	if _, err := fixture.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "IPv6 forwarding") {
 		t.Fatalf("forwarding drift was accepted: %v", err)
 	}
 }
 
-func TestControllerRejectsUnverifiedTailnetPreferenceWrite(t *testing.T) {
-	fixture := newControllerFixture(t)
+func TestReconcilerRejectsUnverifiedTailnetPreferenceWrite(t *testing.T) {
+	fixture := newReconcilerFixture(t)
 	fixture.tailnet.ignoreWrites = true
-	if err := fixture.controller.Prepare(context.Background()); err != nil {
+	if err := fixture.reconciler.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	_, err := fixture.controller.Reconcile(context.Background())
+	_, err := fixture.reconciler.Reconcile(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "did not converge") {
 		t.Fatalf("unverified LocalAPI write was accepted: %v", err)
 	}
@@ -1252,9 +1252,9 @@ func TestStatusRejectsUnavailableDataPlaneAndPreservesRoutineAuditReadiness(t *t
 	}
 }
 
-type controllerFixture struct {
+type reconcilerFixture struct {
 	configuration domain.Configuration
-	controller    *Controller
+	reconciler    *Reconciler
 	discovery     *fakeDiscovery
 	routing       *fakeRoutingStore
 	packetFilter  *fakePacketFilterStore
@@ -1265,7 +1265,7 @@ type controllerFixture struct {
 	recorder      *operationRecorder
 }
 
-func newControllerFixture(t *testing.T) *controllerFixture {
+func newReconcilerFixture(t *testing.T) *reconcilerFixture {
 	t.Helper()
 	configuration := applicationTestConfiguration()
 	recorder := &operationRecorder{}
@@ -1295,7 +1295,7 @@ func newControllerFixture(t *testing.T) *controllerFixture {
 		ProxyLink: discovery.snapshot.ProxyTunnelLink, IPv4: freshCapability, IPv6: freshCapability,
 	}}
 	kernel := &fakeKernelPrerequisites{}
-	controller, err := NewController(configuration, ControllerDependencies{
+	reconciler, err := NewReconciler(configuration, ReconcilerDependencies{
 		Kernel: kernel, ProxyTunnel: discovery, Network: discovery, Routing: routing, PacketFilter: packetFilter, Resolver: resolver, Tailnet: tailnet,
 		InternetCapability: capability,
 		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1303,8 +1303,8 @@ func newControllerFixture(t *testing.T) *controllerFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &controllerFixture{
-		configuration: configuration, controller: controller, discovery: discovery, routing: routing,
+	return &reconcilerFixture{
+		configuration: configuration, reconciler: reconciler, discovery: discovery, routing: routing,
 		packetFilter: packetFilter, resolver: resolver, tailnet: tailnet, capability: capability, kernel: kernel, recorder: recorder,
 	}
 }

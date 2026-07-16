@@ -11,28 +11,28 @@ import (
 	"github.com/ai-matrix-meta/tailscale-gateway-agent/internal/port"
 )
 
-func TestMonitorDebouncesBothFamiliesAndSkipsEarlyCycles(t *testing.T) {
+func TestTrackerDebouncesBothFamiliesAndSkipsEarlyCycles(t *testing.T) {
 	now := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
 	prober := newFakeProber()
-	monitor := newTestMonitor(t, prober, &now)
+	tracker := newTestTracker(t, prober, &now)
 	link := domain.LinkIdentity{Index: 7, Name: "proxy-test"}
 
-	first, err := monitor.Observe(context.Background(), link)
+	first, err := tracker.Observe(context.Background(), link)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.IPv4.Initialized || first.IPv6.Initialized || prober.callCount(domain.IPv4) != 1 || prober.callCount(domain.IPv6) != 1 {
 		t.Fatalf("first success bypassed debounce: snapshot=%#v calls=%v", first, prober.calls)
 	}
-	if _, err := monitor.Observe(context.Background(), link); err != nil {
+	if _, err := tracker.Observe(context.Background(), link); err != nil {
 		t.Fatal(err)
 	}
 	if prober.callCount(domain.IPv4) != 1 || prober.callCount(domain.IPv6) != 1 {
-		t.Fatal("monitor probed again before its interval")
+		t.Fatal("tracker probed again before its interval")
 	}
 
-	now = now.Add(monitor.configuration.ProbeInterval)
-	second, err := monitor.Observe(context.Background(), link)
+	now = now.Add(tracker.configuration.ProbeInterval)
+	second, err := tracker.Observe(context.Background(), link)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,28 +41,28 @@ func TestMonitorDebouncesBothFamiliesAndSkipsEarlyCycles(t *testing.T) {
 	}
 }
 
-func TestMonitorDebouncesFailureAndRecoveryWithSaturatingCounters(t *testing.T) {
+func TestTrackerDebouncesFailureAndRecoveryWithSaturatingCounters(t *testing.T) {
 	now := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
 	prober := newFakeProber()
-	monitor := newTestMonitor(t, prober, &now)
-	monitor.configuration.SuccessThreshold = 1
+	tracker := newTestTracker(t, prober, &now)
+	tracker.configuration.SuccessThreshold = 1
 	link := domain.LinkIdentity{Index: 7, Name: "proxy-test"}
-	if _, err := monitor.Observe(context.Background(), link); err != nil {
+	if _, err := tracker.Observe(context.Background(), link); err != nil {
 		t.Fatal(err)
 	}
-	monitor.configuration.SuccessThreshold = 2
+	tracker.configuration.SuccessThreshold = 2
 
 	prober.setError(domain.IPv6, errors.New("ipv6 target unavailable"))
-	now = now.Add(monitor.configuration.ProbeInterval)
-	firstFailure, err := monitor.Observe(context.Background(), link)
+	now = now.Add(tracker.configuration.ProbeInterval)
+	firstFailure, err := tracker.Observe(context.Background(), link)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !firstFailure.IPv6.Available {
 		t.Fatal("single failure bypassed the configured failure threshold")
 	}
-	now = now.Add(monitor.configuration.ProbeInterval)
-	secondFailure, err := monitor.Observe(context.Background(), link)
+	now = now.Add(tracker.configuration.ProbeInterval)
+	secondFailure, err := tracker.Observe(context.Background(), link)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,40 +70,40 @@ func TestMonitorDebouncesFailureAndRecoveryWithSaturatingCounters(t *testing.T) 
 		t.Fatalf("failure threshold did not make ipv6 unavailable: %#v", secondFailure.IPv6)
 	}
 	for range 32 {
-		now = now.Add(monitor.configuration.ProbeInterval)
-		if _, err := monitor.Observe(context.Background(), link); err != nil {
+		now = now.Add(tracker.configuration.ProbeInterval)
+		if _, err := tracker.Observe(context.Background(), link); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if monitor.ipv6.failureCount != monitor.configuration.FailureThreshold {
-		t.Fatalf("failure counter did not saturate: %d", monitor.ipv6.failureCount)
+	if tracker.ipv6.failureCount != tracker.configuration.FailureThreshold {
+		t.Fatalf("failure counter did not saturate: %d", tracker.ipv6.failureCount)
 	}
 
 	prober.setError(domain.IPv6, nil)
-	now = now.Add(monitor.configuration.ProbeInterval)
-	if snapshot, err := monitor.Observe(context.Background(), link); err != nil || snapshot.IPv6.Available {
+	now = now.Add(tracker.configuration.ProbeInterval)
+	if snapshot, err := tracker.Observe(context.Background(), link); err != nil || snapshot.IPv6.Available {
 		t.Fatalf("single recovery success bypassed debounce: snapshot=%#v err=%v", snapshot, err)
 	}
-	now = now.Add(monitor.configuration.ProbeInterval)
-	recovered, err := monitor.Observe(context.Background(), link)
+	now = now.Add(tracker.configuration.ProbeInterval)
+	recovered, err := tracker.Observe(context.Background(), link)
 	if err != nil || !recovered.IPv6.Fresh(now) {
 		t.Fatalf("ipv6 did not recover after its success threshold: snapshot=%#v err=%v", recovered, err)
 	}
 }
 
-func TestMonitorTreatsExpiredSuccessAsStaleBeforeFailureDebounceCompletes(t *testing.T) {
+func TestTrackerTreatsExpiredSuccessAsStaleBeforeFailureDebounceCompletes(t *testing.T) {
 	now := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
 	prober := newFakeProber()
-	monitor := newTestMonitor(t, prober, &now)
-	monitor.configuration.SuccessThreshold = 1
-	monitor.configuration.ProbeValidity = 15 * time.Second
+	tracker := newTestTracker(t, prober, &now)
+	tracker.configuration.SuccessThreshold = 1
+	tracker.configuration.ProbeValidity = 15 * time.Second
 	link := domain.LinkIdentity{Index: 7, Name: "proxy-test"}
-	if _, err := monitor.Observe(context.Background(), link); err != nil {
+	if _, err := tracker.Observe(context.Background(), link); err != nil {
 		t.Fatal(err)
 	}
 	prober.setError(domain.IPv6, errors.New("ipv6 target unavailable"))
 	now = now.Add(16 * time.Second)
-	snapshot, err := monitor.Observe(context.Background(), link)
+	snapshot, err := tracker.Observe(context.Background(), link)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,18 +112,18 @@ func TestMonitorTreatsExpiredSuccessAsStaleBeforeFailureDebounceCompletes(t *tes
 	}
 }
 
-func TestMonitorInvalidatesOldLinkBeforeProbingReplacement(t *testing.T) {
+func TestTrackerInvalidatesOldLinkBeforeProbingReplacement(t *testing.T) {
 	now := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
 	prober := newFakeProber()
-	monitor := newTestMonitor(t, prober, &now)
-	monitor.configuration.SuccessThreshold = 1
+	tracker := newTestTracker(t, prober, &now)
+	tracker.configuration.SuccessThreshold = 1
 	firstLink := domain.LinkIdentity{Index: 7, Name: "proxy-first"}
 	secondLink := domain.LinkIdentity{Index: 8, Name: "proxy-second"}
-	if _, err := monitor.Observe(context.Background(), firstLink); err != nil {
+	if _, err := tracker.Observe(context.Background(), firstLink); err != nil {
 		t.Fatal(err)
 	}
 	prober.setError(domain.IPv4, errors.New("replacement unavailable"))
-	replaced, err := monitor.Observe(context.Background(), secondLink)
+	replaced, err := tracker.Observe(context.Background(), secondLink)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,17 +132,17 @@ func TestMonitorInvalidatesOldLinkBeforeProbingReplacement(t *testing.T) {
 	}
 }
 
-func TestMonitorRunsAtMostTwoFamilyProbesAndJoinsCancellation(t *testing.T) {
+func TestTrackerRunsAtMostTwoFamilyProbesAndJoinsCancellation(t *testing.T) {
 	now := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
 	prober := newFakeProber()
 	prober.block = make(chan struct{})
 	prober.entered = make(chan domain.AddressFamily, 2)
 	metrics := &fakeCapabilityMetrics{}
-	monitor := newTestMonitorWithMetrics(t, prober, metrics, &now)
+	tracker := newTestTrackerWithMetrics(t, prober, metrics, &now)
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		_, err := monitor.Observe(ctx, domain.LinkIdentity{Index: 7, Name: "proxy-test"})
+		_, err := tracker.Observe(ctx, domain.LinkIdentity{Index: 7, Name: "proxy-test"})
 		result <- err
 	}()
 	for range 2 {
@@ -163,9 +163,9 @@ func TestMonitorRunsAtMostTwoFamilyProbesAndJoinsCancellation(t *testing.T) {
 			t.Fatalf("cancellation error = %v, want context canceled", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("monitor did not join canceled family probes")
+		t.Fatal("tracker did not join canceled family probes")
 	}
-	if monitor.ipv4.successCount != 0 || monitor.ipv4.failureCount != 0 || monitor.ipv6.successCount != 0 || monitor.ipv6.failureCount != 0 {
+	if tracker.ipv4.successCount != 0 || tracker.ipv4.failureCount != 0 || tracker.ipv6.successCount != 0 || tracker.ipv6.failureCount != 0 {
 		t.Fatal("inconclusive cancellation changed debounce state")
 	}
 	if metrics.probeCount(domain.IPv4, port.InternetCapabilityProbeCanceled) != 1 || metrics.probeCount(domain.IPv6, port.InternetCapabilityProbeCanceled) != 1 {
@@ -173,22 +173,22 @@ func TestMonitorRunsAtMostTwoFamilyProbesAndJoinsCancellation(t *testing.T) {
 	}
 }
 
-func newTestMonitor(t *testing.T, prober *fakeProber, now *time.Time) *Monitor {
-	return newTestMonitorWithMetrics(t, prober, &fakeCapabilityMetrics{}, now)
+func newTestTracker(t *testing.T, prober *fakeProber, now *time.Time) *Tracker {
+	return newTestTrackerWithMetrics(t, prober, &fakeCapabilityMetrics{}, now)
 }
 
-func newTestMonitorWithMetrics(t *testing.T, prober *fakeProber, metrics *fakeCapabilityMetrics, now *time.Time) *Monitor {
+func newTestTrackerWithMetrics(t *testing.T, prober *fakeProber, metrics *fakeCapabilityMetrics, now *time.Time) *Tracker {
 	t.Helper()
 	configuration := domain.InternetCapabilityConfiguration{
 		ProbeInterval: 10 * time.Second, ProbeTimeout: time.Second, ProbeValidity: time.Minute,
 		SuccessThreshold: 2, FailureThreshold: 2,
 	}
-	monitor, err := NewMonitor(configuration, 0x11, prober, metrics)
+	tracker, err := NewTracker(configuration, 0x11, prober, metrics)
 	if err != nil {
 		t.Fatal(err)
 	}
-	monitor.now = func() time.Time { return *now }
-	return monitor
+	tracker.now = func() time.Time { return *now }
+	return tracker
 }
 
 type fakeProber struct {

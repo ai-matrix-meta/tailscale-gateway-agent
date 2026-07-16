@@ -111,7 +111,7 @@ preference pair is published atomically whenever at least one family is active;
 an unavailable family retains only its blackhole fallback. Approval observation
 covers both defaults and degrades operational phase without rewriting unchanged
 preferences or removing a verified data plane from readiness. Capability
-monitoring runs inside the existing Agent process; its detailed ownership,
+tracking runs inside the existing Agent process; its detailed ownership,
 security, and transaction contracts are defined in
 [Exit capability and route approval](EXIT-CAPABILITY.md).
 
@@ -145,10 +145,10 @@ Starting -> Quarantined -> Reconciling -> Ready
 Ready/Degraded -> Stopping
 ```
 
-Only the Runner goroutine calls the Controller after startup. Event collectors,
+Only the Controller goroutine calls the Reconciler after startup. Event collectors,
 timers, health handlers, and coordination callbacks never write managed state.
 A network event atomically dirties readiness, cancels the active pass, and
-schedules fresh discovery; the Runner then enforces fail-closed state before
+schedules fresh discovery; the Controller then enforces fail-closed state before
 retrying. A monotonically increasing dirty epoch closes the registration race
 between an event and the active cancellation function.
 
@@ -204,10 +204,10 @@ Coordination ownership is retained until that cleanup completes. Ownership
 loss uses the same strict path; it never retains the live recovery lane.
 
 Startup preparation and every reconciliation have the same configured global
-deadline. A timeout is a failed pass: readiness remains false and the Runner
+deadline. A timeout is a failed pass: readiness remains false and the Controller
 immediately starts a bounded fail-closed pass. That pass inherits lifecycle
-cancellation; if termination or ownership loss races with it, Runtime waits for
-Runner to stop and then owns the one complete shutdown transaction under an
+cancellation; if termination or ownership loss races with it, Supervisor waits
+for Controller to stop and then owns the one complete shutdown transaction under an
 independent deadline.
 
 ## Runtime Modes
@@ -234,4 +234,8 @@ before side effects.
 - Multi-platform registry manifests, runtime metadata, SBOM, provenance, and
   keyless signature are read back before a release tag is promoted.
 - Every execution uses a unique candidate tag. Release promotion is by the
-  build-produced OCI digest only and is the final external write in the job.
+  build-produced OCI digest only and is the final registry write in the publish
+  job.
+- A dependent job creates or verifies the GitHub Release only after OCI
+  publication succeeds and binds its attached metadata to the same tag, commit,
+  digest, creation time, and platform set.

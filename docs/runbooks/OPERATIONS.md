@@ -12,7 +12,7 @@ it hosts Linux; native macOS is outside the runtime contract.
 - `/livez` confirms that the Agent process and health server are alive. It does
   not claim that the gateway is safe to advertise.
 - `/readyz` requires a recent, complete, unsuperseded reconciliation whose
-  Controller result reports `dataPlaneAvailable=true`. A kernel event revokes
+  Reconciler result reports `dataPlaneAvailable=true`. A kernel event revokes
   readiness immediately, before the next write pass starts. The response is
   versioned JSON containing `code`, `ready`, `phase`, `dataPlaneAvailable`, and
   bounded condition codes.
@@ -95,7 +95,7 @@ On any reconciliation failure, the expected state is:
    blackholed.
 4. AdvertiseRoutes is empty.
 5. Readiness is false.
-6. The serialized runner retries with bounded exponential backoff while periodic
+6. The serialized controller retries with bounded exponential backoff while periodic
    audits remain available as a lost-event backstop.
 
 If these conditions do not hold, treat the incident as a control-plane safety
@@ -105,7 +105,7 @@ node, and do not manually insert objects into Agent-owned tables or priorities.
 During supervised startup, a transient missing Self/netmap is expected while
 containerboot authenticates. Table 101 must remain active through the verified
 proxy TUN during that interval. If it contains only blackhole defaults while
-the proxy TUN and resolver are healthy, the runtime has entered a control-plane
+the proxy TUN and resolver are healthy, the Supervisor has entered a control-plane
 bootstrap deadlock and must not be treated as an external Tailnet outage.
 
 ## Exit Capability Degradation
@@ -177,7 +177,7 @@ rendering. Updating the Secret alone does not rebuild an existing Pod.
 
 Normal termination and Kubernetes Lease loss use the same order:
 
-1. stop and join the serialized runner;
+1. stop and join the serialized controller;
 2. close the forwarding gate;
 3. converge fail-closed routing;
 4. clear and verify advertisements;
@@ -187,7 +187,7 @@ Normal termination and Kubernetes Lease loss use the same order:
 Do not terminate containerboot first. That ordering can leave restored or stale
 advertisements without a live owner capable of closing the data plane.
 Strict shutdown blackholes table 101 as well as the Exit table; the recoverable
-local-control lane exists only while coordination ownership and the live Runner
+local-control lane exists only while coordination ownership and the live Controller
 are retained.
 
 ## Release Handoff
@@ -197,10 +197,14 @@ trigger executes it independently against its exact full commit SHA. Every
 release therefore re-runs source gates and isolated Linux integration tests,
 builds a `linux/amd64` and `linux/arm64` OCI index, generates SBOM and provenance,
 signs the immutable digest, and verifies both platforms. Each workflow attempt
-uses a unique candidate tag. The public semver tag is promoted only as the last
-external write.
+uses a unique candidate tag. The public OCI semver tag is promoted only after
+all registry verification. A dependent job then creates or verifies the GitHub
+Release and attaches the exact immutable release metadata. Existing GitHub
+Release state is accepted only when tag, prerelease classification, commit,
+digest, and metadata asset all match.
 
 Use only the real OCI digest reported by the completed release metadata. Do not
 deploy a candidate tag, signature artifact tag, old digest, or mutable semver
 tag. Update the Kubernetes image digest only after the Agent commit is pushed
-and the complete release workflow succeeds.
+and the complete release workflow, including GitHub Release publication,
+succeeds.

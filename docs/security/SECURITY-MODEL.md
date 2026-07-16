@@ -45,7 +45,7 @@ Role is restricted to get/update/patch on one pre-created Tailscale state Secret
 and get/update on one pre-created identity Lease. It has no Pod, Event, or
 namespace-wide Create permission.
 
-Deleting the Lease or losing renewal cancels the owned runtime. Fail-closed
+Deleting the Lease or losing renewal cancels the owned Supervisor run. Fail-closed
 cleanup and containerboot termination complete before coordination returns.
 
 ## Secrets
@@ -64,7 +64,7 @@ names; logs are therefore internal telemetry and require access control.
 
 ## Capability Probe Egress
 
-The in-process capability monitor sends only bounded HTTPS GET requests to the
+The in-process capability tracker sends only bounded HTTPS GET requests to the
 two statically configured, externally approved endpoints. It sends no
 credentials, cookies, request body, authorization, or ambient proxy headers.
 Redirects and environment proxies are disabled, normal hostname and TLS 1.2+
@@ -86,7 +86,12 @@ Release jobs rerun source and isolated Linux integration gates. They publish a
 two-platform OCI index, SBOM, provenance, and keyless signature under an
 immutable digest. Each attempt has a unique candidate tag. The public semver tag
 is promoted by digest only after complete registry and runtime readback and is
-the job's final external write.
+the publish job's final registry write.
+
+The GitHub Release is published only by a dependent job after OCI promotion
+succeeds. It carries the same immutable metadata as an attached asset. Existing
+Release state is verified and never overwritten when its tag, commit, digest,
+classification, or metadata differs.
 
 Manual releases can run only from `main`. Signature and provenance verification
 binds the certificate to the exact release workflow identity on `main` or the

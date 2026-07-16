@@ -38,13 +38,13 @@ func TestInternalDependencyDirection(t *testing.T) {
 	}
 
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if shouldSkipLocalStatePath(path, entry) {
+			return skipLocalStatePath(entry)
+		}
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "vendor" {
-				return filepath.SkipDir
-			}
 			return nil
 		}
 		if filepath.Ext(path) != ".go" {
@@ -128,6 +128,9 @@ func TestNoExternalNetworkCommandExecution(t *testing.T) {
 		"tailscale": true, "awk": true, "jq": true, "sh": true, "bash": true,
 	}
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if shouldSkipLocalStatePath(path, entry) {
+			return skipLocalStatePath(entry)
+		}
 		if walkErr != nil || entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
 			return walkErr
 		}
@@ -184,13 +187,13 @@ func TestNoHardCodedExecutionEnvironmentContracts(t *testing.T) {
 		"GATEWAY_DATAPLANE_" + "POD_NETWORK_SETTING_INTERFACE",
 	}
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if shouldSkipLocalStatePath(path, entry) {
+			return skipLocalStatePath(entry)
+		}
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "vendor" {
-				return filepath.SkipDir
-			}
 			return nil
 		}
 		if strings.HasSuffix(path, "_test.go") {
@@ -217,6 +220,21 @@ func TestNoHardCodedExecutionEnvironmentContracts(t *testing.T) {
 	}
 }
 
+func shouldSkipLocalStatePath(path string, entry os.DirEntry) bool {
+	name := filepath.Base(path)
+	if entry != nil {
+		name = entry.Name()
+	}
+	return name == ".git" || name == "vendor" || name == ".agent-state" || name == ".env" || strings.HasPrefix(name, ".env.")
+}
+
+func skipLocalStatePath(entry os.DirEntry) error {
+	if entry != nil && entry.IsDir() {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
 func TestArchitecturePathClassificationFailsClosed(t *testing.T) {
 	tests := []struct {
 		path  string
@@ -225,7 +243,7 @@ func TestArchitecturePathClassificationFailsClosed(t *testing.T) {
 	}{
 		{path: "cmd/tailscale-gateway-agent/main.go", layer: "cmd", pkg: "cmd/tailscale-gateway-agent"},
 		{path: "internal/application/reconciler.go", layer: "application", pkg: "application"},
-		{path: "internal/application/capability/monitor.go", layer: "application", pkg: "application/capability"},
+		{path: "internal/application/capability/tracker.go", layer: "application", pkg: "application/capability"},
 		{path: "internal/adapter/netlink/netlink_linux.go", layer: "adapter", pkg: "adapter/netlink"},
 		{path: "internal/unowned/runtime.go", layer: "", pkg: "unowned"},
 		{path: "experimental/runtime.go", layer: "", pkg: ""},

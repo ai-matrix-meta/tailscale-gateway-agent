@@ -16,7 +16,7 @@ type familyState struct {
 	failureCount uint32
 }
 
-type Monitor struct {
+type Tracker struct {
 	configuration domain.InternetCapabilityConfiguration
 	packetMark    uint32
 	prober        port.InternetEgressProber
@@ -30,7 +30,7 @@ type Monitor struct {
 	ipv6      familyState
 }
 
-func NewMonitor(configuration domain.InternetCapabilityConfiguration, packetMark uint32, prober port.InternetEgressProber, metrics port.InternetCapabilityMetrics) (*Monitor, error) {
+func NewTracker(configuration domain.InternetCapabilityConfiguration, packetMark uint32, prober port.InternetEgressProber, metrics port.InternetCapabilityMetrics) (*Tracker, error) {
 	if prober == nil || metrics == nil {
 		return nil, errors.New("internet egress prober and metrics are required")
 	}
@@ -46,7 +46,7 @@ func NewMonitor(configuration domain.InternetCapabilityConfiguration, packetMark
 	if packetMark == 0 || packetMark&^domain.LocalEgressPacketMarkMask != 0 {
 		return nil, fmt.Errorf("capability packet mark %#x is outside the Agent-owned low 16 bits", packetMark)
 	}
-	return &Monitor{
+	return &Tracker{
 		configuration: configuration,
 		packetMark:    packetMark,
 		prober:        prober,
@@ -56,7 +56,7 @@ func NewMonitor(configuration domain.InternetCapabilityConfiguration, packetMark
 	}, nil
 }
 
-func (monitor *Monitor) Observe(ctx context.Context, proxyLink domain.LinkIdentity) (domain.InternetCapabilitySnapshot, error) {
+func (tracker *Tracker) Observe(ctx context.Context, proxyLink domain.LinkIdentity) (domain.InternetCapabilitySnapshot, error) {
 	if ctx == nil {
 		return domain.InternetCapabilitySnapshot{}, errors.New("capability observation context is required")
 	}
@@ -64,31 +64,31 @@ func (monitor *Monitor) Observe(ctx context.Context, proxyLink domain.LinkIdenti
 		return domain.InternetCapabilitySnapshot{}, fmt.Errorf("validate capability proxy link: %w", err)
 	}
 	select {
-	case monitor.cycle <- struct{}{}:
-		defer func() { <-monitor.cycle }()
+	case tracker.cycle <- struct{}{}:
+		defer func() { <-tracker.cycle }()
 	case <-ctx.Done():
 		return domain.InternetCapabilitySnapshot{}, ctx.Err()
 	}
 
-	now := monitor.now()
+	now := tracker.now()
 	if now.IsZero() {
 		return domain.InternetCapabilitySnapshot{}, errors.New("capability clock returned a zero time")
 	}
-	if monitor.proxyLink != proxyLink {
-		monitor.resetForLink(proxyLink)
+	if tracker.proxyLink != proxyLink {
+		tracker.resetForLink(proxyLink)
 	}
-	if !monitor.lastProbe.IsZero() && now.Before(monitor.lastProbe) {
-		return monitor.snapshot(), errors.New("capability clock moved backwards")
+	if !tracker.lastProbe.IsZero() && now.Before(tracker.lastProbe) {
+		return tracker.snapshot(), errors.New("capability clock moved backwards")
 	}
-	if !monitor.probeDue(now) {
-		snapshot := monitor.snapshot()
-		monitor.metrics.RecordInternetCapabilitySnapshot(snapshot, now)
+	if !tracker.probeDue(now) {
+		snapshot := tracker.snapshot()
+		tracker.metrics.RecordInternetCapabilitySnapshot(snapshot, now)
 		return snapshot, nil
 	}
 
 	results := make(chan probeResult, 2)
 	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
-		go monitor.probeFamily(ctx, proxyLink, family, results)
+		go tracker.probeFamily(ctx, proxyLink, family, results)
 	}
 	observations := [2]probeResult{<-results, <-results}
 	for _, observation := range observations {
@@ -98,24 +98,24 @@ func (monitor *Monitor) Observe(ctx context.Context, proxyLink domain.LinkIdenti
 		} else if observation.err == nil {
 			result = port.InternetCapabilityProbeSucceeded
 		}
-		monitor.metrics.RecordInternetCapabilityProbe(observation.family, result)
+		tracker.metrics.RecordInternetCapabilityProbe(observation.family, result)
 	}
 	if err := ctx.Err(); err != nil {
-		return monitor.snapshot(), err
+		return tracker.snapshot(), err
 	}
-	observedAt := monitor.now()
+	observedAt := tracker.now()
 	if observedAt.IsZero() || observedAt.Before(now) {
-		return monitor.snapshot(), errors.New("capability clock returned an invalid observation time")
+		return tracker.snapshot(), errors.New("capability clock returned an invalid observation time")
 	}
 	for _, observation := range observations {
-		monitor.applyObservation(observation.family, observation.err == nil, observedAt)
+		tracker.applyObservation(observation.family, observation.err == nil, observedAt)
 	}
-	monitor.lastProbe = observedAt
-	snapshot := monitor.snapshot()
+	tracker.lastProbe = observedAt
+	snapshot := tracker.snapshot()
 	if err := snapshot.Validate(); err != nil {
 		return domain.InternetCapabilitySnapshot{}, fmt.Errorf("validate capability snapshot: %w", err)
 	}
-	monitor.metrics.RecordInternetCapabilitySnapshot(snapshot, observedAt)
+	tracker.metrics.RecordInternetCapabilitySnapshot(snapshot, observedAt)
 	return snapshot, nil
 }
 
@@ -124,51 +124,51 @@ type probeResult struct {
 	err    error
 }
 
-func (monitor *Monitor) probeFamily(ctx context.Context, proxyLink domain.LinkIdentity, family domain.AddressFamily, results chan<- probeResult) {
-	probeContext, cancel := context.WithTimeout(ctx, monitor.configuration.ProbeTimeout)
+func (tracker *Tracker) probeFamily(ctx context.Context, proxyLink domain.LinkIdentity, family domain.AddressFamily, results chan<- probeResult) {
+	probeContext, cancel := context.WithTimeout(ctx, tracker.configuration.ProbeTimeout)
 	defer cancel()
-	err := monitor.prober.Probe(probeContext, port.InternetEgressProbeRequest{
-		Family: family, ProxyLink: proxyLink, PacketMark: monitor.packetMark,
+	err := tracker.prober.Probe(probeContext, port.InternetEgressProbeRequest{
+		Family: family, ProxyLink: proxyLink, PacketMark: tracker.packetMark,
 	})
 	results <- probeResult{family: family, err: err}
 }
 
-func (monitor *Monitor) probeDue(now time.Time) bool {
-	if monitor.lastProbe.IsZero() || !now.Before(monitor.lastProbe.Add(monitor.configuration.ProbeInterval)) {
+func (tracker *Tracker) probeDue(now time.Time) bool {
+	if tracker.lastProbe.IsZero() || !now.Before(tracker.lastProbe.Add(tracker.configuration.ProbeInterval)) {
 		return true
 	}
-	return expired(monitor.ipv4.capability, now) || expired(monitor.ipv6.capability, now)
+	return expired(tracker.ipv4.capability, now) || expired(tracker.ipv6.capability, now)
 }
 
 func expired(capability domain.InternetFamilyCapability, now time.Time) bool {
 	return capability.Available && now.After(capability.ValidUntil)
 }
 
-func (monitor *Monitor) resetForLink(proxyLink domain.LinkIdentity) {
-	monitor.proxyLink = proxyLink
-	monitor.lastProbe = time.Time{}
-	monitor.ipv4 = familyState{}
-	monitor.ipv6 = familyState{}
+func (tracker *Tracker) resetForLink(proxyLink domain.LinkIdentity) {
+	tracker.proxyLink = proxyLink
+	tracker.lastProbe = time.Time{}
+	tracker.ipv4 = familyState{}
+	tracker.ipv6 = familyState{}
 }
 
-func (monitor *Monitor) applyObservation(family domain.AddressFamily, succeeded bool, observedAt time.Time) {
-	state := monitor.family(family)
+func (tracker *Tracker) applyObservation(family domain.AddressFamily, succeeded bool, observedAt time.Time) {
+	state := tracker.family(family)
 	if succeeded {
 		state.failureCount = 0
-		state.successCount = saturatingIncrement(state.successCount, monitor.configuration.SuccessThreshold)
-		if state.successCount >= monitor.configuration.SuccessThreshold {
+		state.successCount = saturatingIncrement(state.successCount, tracker.configuration.SuccessThreshold)
+		if state.successCount >= tracker.configuration.SuccessThreshold {
 			state.capability = domain.InternetFamilyCapability{
 				Initialized: true,
 				Available:   true,
 				ObservedAt:  observedAt,
-				ValidUntil:  observedAt.Add(monitor.configuration.ProbeValidity),
+				ValidUntil:  observedAt.Add(tracker.configuration.ProbeValidity),
 			}
 		}
 		return
 	}
 	state.successCount = 0
-	state.failureCount = saturatingIncrement(state.failureCount, monitor.configuration.FailureThreshold)
-	if state.failureCount >= monitor.configuration.FailureThreshold {
+	state.failureCount = saturatingIncrement(state.failureCount, tracker.configuration.FailureThreshold)
+	if state.failureCount >= tracker.configuration.FailureThreshold {
 		state.capability = domain.InternetFamilyCapability{
 			Initialized: true,
 			Available:   false,
@@ -177,18 +177,18 @@ func (monitor *Monitor) applyObservation(family domain.AddressFamily, succeeded 
 	}
 }
 
-func (monitor *Monitor) family(family domain.AddressFamily) *familyState {
+func (tracker *Tracker) family(family domain.AddressFamily) *familyState {
 	if family == domain.IPv4 {
-		return &monitor.ipv4
+		return &tracker.ipv4
 	}
-	return &monitor.ipv6
+	return &tracker.ipv6
 }
 
-func (monitor *Monitor) snapshot() domain.InternetCapabilitySnapshot {
+func (tracker *Tracker) snapshot() domain.InternetCapabilitySnapshot {
 	return domain.InternetCapabilitySnapshot{
-		ProxyLink: monitor.proxyLink,
-		IPv4:      monitor.ipv4.capability,
-		IPv6:      monitor.ipv6.capability,
+		ProxyLink: tracker.proxyLink,
+		IPv4:      tracker.ipv4.capability,
+		IPv6:      tracker.ipv6.capability,
 	}
 }
 
