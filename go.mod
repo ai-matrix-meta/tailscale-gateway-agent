@@ -1,6 +1,6 @@
 module github.com/ai-matrix-meta/tailscale-gateway-agent
 
-go 1.26.3
+go 1.26.4
 
 toolchain go1.26.5
 
@@ -12,7 +12,7 @@ require (
 	golang.org/x/sys v0.47.0
 	k8s.io/apimachinery v0.36.2
 	k8s.io/client-go v0.36.2
-	tailscale.com v1.98.3
+	tailscale.com v1.100.0
 )
 
 require (
@@ -25,7 +25,7 @@ require (
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced // indirect
+	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.4 // indirect
