@@ -43,7 +43,7 @@ func TestLoadParsesCompleteProductionValues(t *testing.T) {
 		nftablesLocalEgressIPv4Set + "=local_ipv4_test",
 		nftablesLocalEgressIPv6Set + "=local_ipv6_test",
 		nftablesNATTable + "=gateway_nat_test",
-		nftablesDNSSNATChain + "=dns_snat_test",
+		nftablesDNSMasqueradeChain + "=dns_masquerade_test",
 		localEgressEnabled + "=true",
 		localEgressDomains + "=login.example.com,control.example.com",
 		localEgressProtocols + "=udp,tcp",
@@ -94,7 +94,7 @@ func TestLoadParsesCompleteProductionValues(t *testing.T) {
 		},
 		PacketFilter: domain.PacketFilterConfiguration{
 			FilterTable: "gateway_filter_test", ForwardGuardChain: "forward_guard_test", LocalEgressChain: "local_egress_test",
-			LocalEgressIPv4Set: "local_ipv4_test", LocalEgressIPv6Set: "local_ipv6_test", NATTable: "gateway_nat_test", DNSMasqueradeChain: "dns_snat_test",
+			LocalEgressIPv4Set: "local_ipv4_test", LocalEgressIPv6Set: "local_ipv6_test", NATTable: "gateway_nat_test", DNSMasqueradeChain: "dns_masquerade_test",
 			LocalEgress: domain.LocalEgressConfiguration{
 				Enabled: true, Domains: []string{"control.example.com", "login.example.com"},
 				Protocols: []domain.TransportProtocol{domain.TransportTCP, domain.TransportUDP}, Ports: []uint16{443, 8443},

@@ -22,7 +22,7 @@ const (
 	TransportUDP TransportProtocol = "udp"
 )
 
-type DNSSNATTarget struct {
+type DNSMasqueradeTarget struct {
 	Address         netip.Addr
 	OutputInterface string
 }
@@ -47,7 +47,7 @@ type PacketFilterPolicy struct {
 	GateClosed         bool
 	TailnetIPv4Prefix  netip.Prefix
 	TailnetIPv6Prefix  netip.Prefix
-	DNSTargets         []DNSSNATTarget
+	DNSTargets         []DNSMasqueradeTarget
 	LocalEgress        LocalEgressPolicy
 }
 
@@ -86,13 +86,13 @@ func (policy PacketFilterPolicy) Validate() error {
 	for _, target := range policy.DNSTargets {
 		address := target.Address.Unmap()
 		if !address.IsValid() || address.Zone() != "" || address.IsUnspecified() || address.IsMulticast() {
-			validationErrors = append(validationErrors, fmt.Errorf("DNS SNAT target address %q is invalid", target.Address))
+			validationErrors = append(validationErrors, fmt.Errorf("DNS masquerade target address %q is invalid", target.Address))
 		}
 		if err := (LinkIdentity{Index: 1, Name: target.OutputInterface}).Validate(); err != nil {
-			validationErrors = append(validationErrors, fmt.Errorf("DNS SNAT target %s has invalid output interface: %w", address, err))
+			validationErrors = append(validationErrors, fmt.Errorf("DNS masquerade target %s has invalid output interface: %w", address, err))
 		}
 		if previousInterface, duplicate := seenTargets[address]; duplicate {
-			validationErrors = append(validationErrors, fmt.Errorf("DNS SNAT address %s has multiple output interfaces %q and %q", address, previousInterface, target.OutputInterface))
+			validationErrors = append(validationErrors, fmt.Errorf("DNS masquerade address %s has multiple output interfaces %q and %q", address, previousInterface, target.OutputInterface))
 		}
 		seenTargets[address] = target.OutputInterface
 	}
@@ -183,7 +183,7 @@ func (policy PacketFilterPolicy) FilterRevision() string {
 
 func (policy PacketFilterPolicy) NATRevision() string {
 	targets := slices.Clone(policy.DNSTargets)
-	slices.SortFunc(targets, compareDNSTargets)
+	slices.SortFunc(targets, compareDNSMasqueradeTargets)
 	fields := []string{policy.NATTable, policy.DNSMasqueradeChain, policy.TailnetIPv4Prefix.String(), policy.TailnetIPv6Prefix.String()}
 	for _, target := range targets {
 		fields = append(fields, target.Address.Unmap().String()+"@"+target.OutputInterface)
@@ -206,7 +206,7 @@ func (observation PacketFilterObservation) NATMatches(policy PacketFilterPolicy)
 	return observation.NATTableExists && observation.NATRevision == policy.NATRevision()
 }
 
-func compareDNSTargets(left, right DNSSNATTarget) int {
+func compareDNSMasqueradeTargets(left, right DNSMasqueradeTarget) int {
 	if comparison := left.Address.Unmap().Compare(right.Address.Unmap()); comparison != 0 {
 		return comparison
 	}
@@ -228,15 +228,6 @@ func validateAddressFamilyList(label string, values []netip.Addr, family Address
 		seen[address] = struct{}{}
 	}
 	return errors.Join(validationErrors...)
-}
-
-func sortedAddresses(values []netip.Addr) []netip.Addr {
-	result := make([]netip.Addr, 0, len(values))
-	for _, value := range values {
-		result = append(result, value.Unmap())
-	}
-	slices.SortFunc(result, func(left, right netip.Addr) int { return left.Compare(right) })
-	return slices.Compact(result)
 }
 
 func fingerprint(fields []string) string {

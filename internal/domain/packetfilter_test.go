@@ -25,7 +25,7 @@ func TestPacketFilterPolicyRejectsInvalidDynamicFacts(t *testing.T) {
 
 func TestPacketFilterPolicyRejectsAmbiguousDNSEgress(t *testing.T) {
 	policy := validPacketFilterPolicy()
-	policy.DNSTargets = append(policy.DNSTargets, DNSSNATTarget{
+	policy.DNSTargets = append(policy.DNSTargets, DNSMasqueradeTarget{
 		Address: policy.DNSTargets[0].Address, OutputInterface: "different-path",
 	})
 	if err := policy.Validate(); err == nil || !strings.Contains(err.Error(), "multiple output interfaces") {
@@ -49,10 +49,10 @@ func validPacketFilterPolicy() PacketFilterPolicy {
 		LocalEgressIPv4Set: "proxy_targets_v4",
 		LocalEgressIPv6Set: "proxy_targets_v6",
 		NATTable:           "gateway_nat",
-		DNSMasqueradeChain: "dns_snat",
+		DNSMasqueradeChain: "dns_masquerade",
 		TailnetIPv4Prefix:  netip.MustParsePrefix("100.64.0.0/10"),
 		TailnetIPv6Prefix:  netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
-		DNSTargets: []DNSSNATTarget{
+		DNSTargets: []DNSMasqueradeTarget{
 			{Address: netip.MustParseAddr("10.43.0.10"), OutputInterface: "dns-v4"},
 			{Address: netip.MustParseAddr("fd00:43::a"), OutputInterface: "dns-v6"},
 		},

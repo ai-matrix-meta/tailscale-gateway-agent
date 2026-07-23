@@ -41,7 +41,7 @@ type markedDeviceDialer interface {
 	DialContext(context.Context, string, string, domain.LinkIdentity, uint32) (net.Conn, error)
 }
 
-type Adapter struct {
+type Prober struct {
 	endpoints map[domain.AddressFamily]endpoint
 	timeout   time.Duration
 	resolver  addressResolver
@@ -49,7 +49,7 @@ type Adapter struct {
 	rootCAs   *x509.CertPool
 }
 
-func New(ipv4URL, ipv6URL string, timeout time.Duration) (*Adapter, error) {
+func New(ipv4URL, ipv6URL string, timeout time.Duration) (*Prober, error) {
 	if timeout <= 0 {
 		return nil, errors.New("capability probe timeout must be positive")
 	}
@@ -61,7 +61,7 @@ func New(ipv4URL, ipv6URL string, timeout time.Duration) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse ipv6 capability endpoint: %w", err)
 	}
-	return &Adapter{
+	return &Prober{
 		endpoints: map[domain.AddressFamily]endpoint{domain.IPv4: ipv4, domain.IPv6: ipv6},
 		timeout:   timeout,
 		resolver:  net.DefaultResolver,
@@ -69,47 +69,47 @@ func New(ipv4URL, ipv6URL string, timeout time.Duration) (*Adapter, error) {
 	}, nil
 }
 
-func (adapter *Adapter) Probe(ctx context.Context, request port.InternetEgressProbeRequest) error {
+func (prober *Prober) Probe(ctx context.Context, request port.InternetEgressProbeRequest) error {
 	if ctx == nil {
 		return errors.New("internet capability probe context is required")
 	}
 	if err := request.Validate(); err != nil {
 		return err
 	}
-	target, exists := adapter.endpoints[request.Family]
+	target, exists := prober.endpoints[request.Family]
 	if !exists {
 		return fmt.Errorf("internet capability endpoint for family %d is not configured", request.Family)
 	}
-	addresses, err := adapter.resolve(ctx, target)
+	addresses, err := prober.resolve(ctx, target)
 	if err != nil {
 		return err
 	}
 
 	transport := &http.Transport{
 		Proxy:                  nil,
-		DialContext:            adapter.pinnedDialContext(request, target, addresses),
+		DialContext:            prober.pinnedDialContext(request, target, addresses),
 		ForceAttemptHTTP2:      false,
 		DisableKeepAlives:      true,
 		DisableCompression:     true,
-		TLSHandshakeTimeout:    adapter.timeout,
-		ResponseHeaderTimeout:  adapter.timeout,
+		TLSHandshakeTimeout:    prober.timeout,
+		ResponseHeaderTimeout:  prober.timeout,
 		ExpectContinueTimeout:  0,
 		MaxResponseHeaderBytes: maximumResponseHeaders,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			ServerName: target.hostname,
-			RootCAs:    adapter.rootCAs,
+			RootCAs:    prober.rootCAs,
 		},
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   adapter.timeout,
+		Timeout:   prober.timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return errRedirectRejected
 		},
 	}
-	probeContext, cancel := context.WithTimeout(ctx, adapter.timeout)
+	probeContext, cancel := context.WithTimeout(ctx, prober.timeout)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(probeContext, http.MethodGet, target.url.String(), nil)
 	if err != nil {
@@ -135,7 +135,7 @@ func (adapter *Adapter) Probe(ctx context.Context, request port.InternetEgressPr
 	return nil
 }
 
-func (adapter *Adapter) resolve(ctx context.Context, target endpoint) ([]netip.Addr, error) {
+func (prober *Prober) resolve(ctx context.Context, target endpoint) ([]netip.Addr, error) {
 	var network string
 	switch target.family {
 	case domain.IPv4:
@@ -145,7 +145,7 @@ func (adapter *Adapter) resolve(ctx context.Context, target endpoint) ([]netip.A
 	default:
 		return nil, fmt.Errorf("resolve capability endpoint: unsupported address family %d", target.family)
 	}
-	addresses, err := adapter.resolver.LookupNetIP(ctx, network, target.hostname)
+	addresses, err := prober.resolver.LookupNetIP(ctx, network, target.hostname)
 	if err != nil {
 		return nil, fmt.Errorf("resolve capability endpoint: %w", err)
 	}
@@ -156,7 +156,7 @@ func (adapter *Adapter) resolve(ctx context.Context, target endpoint) ([]netip.A
 	return validated, nil
 }
 
-func (adapter *Adapter) pinnedDialContext(request port.InternetEgressProbeRequest, target endpoint, addresses []netip.Addr) func(context.Context, string, string) (net.Conn, error) {
+func (prober *Prober) pinnedDialContext(request port.InternetEgressProbeRequest, target endpoint, addresses []netip.Addr) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, _, _ string) (net.Conn, error) {
 		network := "tcp4"
 		if request.Family == domain.IPv6 {
@@ -164,7 +164,7 @@ func (adapter *Adapter) pinnedDialContext(request port.InternetEgressProbeReques
 		}
 		var dialErrors []error
 		for _, address := range addresses {
-			connection, err := adapter.dialer.DialContext(
+			connection, err := prober.dialer.DialContext(
 				ctx, network, net.JoinHostPort(address.String(), target.port), request.ProxyLink, request.PacketMark,
 			)
 			if err == nil {

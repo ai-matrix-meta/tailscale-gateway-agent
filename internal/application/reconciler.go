@@ -202,69 +202,106 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (domain.ReconcileRe
 		return report, err
 	}
 	if routingChanges.Empty() && packetFilterObservation.Matches(desiredPolicy) {
-		if err := ctx.Err(); err != nil {
-			return report, err
-		}
-		if !tailnetState.Preferences.Equal(desiredPreferences) {
-			if err := reconciler.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
-				return report, err
-			}
-			verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
-			if writeErr != nil {
-				return report, fmt.Errorf("publish Tailscale advertisements after final data-plane verification: %w", writeErr)
-			}
-			report.TailnetWrites++
-			report.Changed = true
-			tailnetState = verifiedState
-		}
-		reconciler.lastPacketPolicy = desiredPolicy
-		reconciler.hasPacketPolicy = true
-		reconciler.quarantined = false
-		reconciler.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
-		return report, nil
+		return reconciler.reconcileNoDrift(
+			ctx, report, tailnetState, desiredRouting, desiredPolicy, desiredPreferences, activeExitDefaultRoutes,
+		)
 	}
 	isolatedExitDefaultTransition := nonExitPreferencesMatch && onlyExitDefaultRoutesChanged &&
 		packetFilterObservation.Matches(desiredPolicy)
 	if isolatedExitDefaultTransition {
-		if !desiredPreferences.AdvertisesExitNode() && tailnetState.Preferences.HasExitDefaultRoutes() {
-			verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
-			if writeErr != nil {
-				return report, fmt.Errorf("withdraw Exit Node advertisement before deactivating its final route: %w", writeErr)
-			}
-			report.TailnetWrites++
-			report.Changed = true
-			tailnetState = verifiedState
-		}
-		routingWrites, applyErr := reconciler.applyExitDefaultRouteTransition(
-			ctx, desiredRouting, exitDefaultTransition,
+		return reconciler.reconcileIsolatedExitDefaultTransition(
+			ctx, report, tailnetState, desiredRouting, desiredPolicy, desiredPreferences, activeExitDefaultRoutes, exitDefaultTransition,
 		)
-		report.RoutingWrites += routingWrites
-		report.Changed = report.Changed || routingWrites > 0
-		if applyErr != nil {
-			return report, applyErr
-		}
+	}
+
+	return reconciler.reconcileGlobalDrift(
+		ctx, report, tailnetState, desiredRouting, desiredPolicy, desiredPreferences, activeExitDefaultRoutes, routingChanges, disabledPreferences,
+	)
+}
+
+func (reconciler *Reconciler) reconcileNoDrift(
+	ctx context.Context,
+	report domain.ReconcileReport,
+	tailnetState domain.TailnetState,
+	desiredRouting domain.RoutingState,
+	desiredPolicy domain.PacketFilterPolicy,
+	desiredPreferences domain.TailnetPreferences,
+	activeExitDefaultRoutes domain.ExitDefaultRouteSet,
+) (domain.ReconcileReport, error) {
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if !tailnetState.Preferences.Equal(desiredPreferences) {
 		if err := reconciler.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
 			return report, err
 		}
-		if err := ctx.Err(); err != nil {
-			return report, err
+		var writeErr error
+		tailnetState, writeErr = reconciler.publishTailnetPreferences(
+			ctx, &report, desiredPreferences, "publish Tailscale advertisements after final data-plane verification",
+		)
+		if writeErr != nil {
+			return report, writeErr
 		}
-		if !tailnetState.Preferences.Equal(desiredPreferences) {
-			verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
-			if writeErr != nil {
-				return report, fmt.Errorf("publish atomic Exit Node advertisement after route verification: %w", writeErr)
-			}
-			report.TailnetWrites++
-			report.Changed = true
-			tailnetState = verifiedState
-		}
-		reconciler.lastPacketPolicy = desiredPolicy
-		reconciler.hasPacketPolicy = true
-		reconciler.quarantined = false
-		reconciler.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
-		return report, nil
 	}
+	reconciler.finalizeSuccessfulReconcile(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes, desiredPolicy)
+	return report, nil
+}
 
+func (reconciler *Reconciler) reconcileIsolatedExitDefaultTransition(
+	ctx context.Context,
+	report domain.ReconcileReport,
+	tailnetState domain.TailnetState,
+	desiredRouting domain.RoutingState,
+	desiredPolicy domain.PacketFilterPolicy,
+	desiredPreferences domain.TailnetPreferences,
+	activeExitDefaultRoutes domain.ExitDefaultRouteSet,
+	transition exitDefaultRouteTransition,
+) (domain.ReconcileReport, error) {
+	if !desiredPreferences.AdvertisesExitNode() && tailnetState.Preferences.HasExitDefaultRoutes() {
+		var writeErr error
+		tailnetState, writeErr = reconciler.publishTailnetPreferences(
+			ctx, &report, desiredPreferences, "withdraw Exit Node advertisement before deactivating its final route",
+		)
+		if writeErr != nil {
+			return report, writeErr
+		}
+	}
+	routingWrites, applyErr := reconciler.applyExitDefaultRouteTransition(ctx, desiredRouting, transition)
+	report.RoutingWrites += routingWrites
+	report.Changed = report.Changed || routingWrites > 0
+	if applyErr != nil {
+		return report, applyErr
+	}
+	if err := reconciler.verifyDataPlane(ctx, desiredRouting, desiredPolicy); err != nil {
+		return report, err
+	}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if !tailnetState.Preferences.Equal(desiredPreferences) {
+		var writeErr error
+		tailnetState, writeErr = reconciler.publishTailnetPreferences(
+			ctx, &report, desiredPreferences, "publish atomic Exit Node advertisement after route verification",
+		)
+		if writeErr != nil {
+			return report, writeErr
+		}
+	}
+	reconciler.finalizeSuccessfulReconcile(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes, desiredPolicy)
+	return report, nil
+}
+
+func (reconciler *Reconciler) reconcileGlobalDrift(
+	ctx context.Context,
+	report domain.ReconcileReport,
+	tailnetState domain.TailnetState,
+	desiredRouting domain.RoutingState,
+	desiredPolicy domain.PacketFilterPolicy,
+	desiredPreferences domain.TailnetPreferences,
+	activeExitDefaultRoutes domain.ExitDefaultRouteSet,
+	routingChanges domain.RoutingChanges,
+	disabledPreferences domain.TailnetPreferences,
+) (domain.ReconcileReport, error) {
 	closedPolicy := desiredPolicy
 	closedPolicy.GateClosed = true
 	packetFilterWrites, err := reconciler.reconcilePacketFilter(ctx, closedPolicy)
@@ -278,13 +315,13 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (domain.ReconcileRe
 	reconciler.quarantined = true
 
 	if !tailnetState.Preferences.Equal(disabledPreferences) {
-		verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, disabledPreferences)
+		var writeErr error
+		tailnetState, writeErr = reconciler.publishTailnetPreferences(
+			ctx, &report, disabledPreferences, "clear Tailscale advertisements before applying drift",
+		)
 		if writeErr != nil {
-			return report, fmt.Errorf("clear Tailscale advertisements before applying drift: %w", writeErr)
+			return report, writeErr
 		}
-		report.TailnetWrites++
-		report.Changed = true
-		tailnetState = verifiedState
 	}
 
 	routingWrites, err := reconciler.applyRoutingPlan(ctx, desiredRouting, routingChanges)
@@ -306,13 +343,13 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (domain.ReconcileRe
 		return report, err
 	}
 	if !tailnetState.Preferences.Equal(desiredPreferences) {
-		verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, desiredPreferences)
+		var writeErr error
+		tailnetState, writeErr = reconciler.publishTailnetPreferences(
+			ctx, &report, desiredPreferences, "publish Tailscale advertisements",
+		)
 		if writeErr != nil {
-			return report, fmt.Errorf("publish Tailscale advertisements: %w", writeErr)
+			return report, writeErr
 		}
-		report.TailnetWrites++
-		report.Changed = true
-		tailnetState = verifiedState
 	} else {
 		tailnetState, err = reconciler.readTailnetState(ctx)
 		if err != nil {
@@ -322,11 +359,31 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (domain.ReconcileRe
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
+	reconciler.finalizeSuccessfulReconcile(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes, desiredPolicy)
+	return report, nil
+}
+
+func (reconciler *Reconciler) publishTailnetPreferences(ctx context.Context, report *domain.ReconcileReport, preferences domain.TailnetPreferences, operation string) (domain.TailnetState, error) {
+	verifiedState, writeErr := reconciler.writeAndVerifyTailnetPreferences(ctx, preferences)
+	if writeErr != nil {
+		return domain.TailnetState{}, fmt.Errorf("%s: %w", operation, writeErr)
+	}
+	report.TailnetWrites++
+	report.Changed = true
+	return verifiedState, nil
+}
+
+func (reconciler *Reconciler) finalizeSuccessfulReconcile(
+	report *domain.ReconcileReport,
+	tailnetState domain.TailnetState,
+	desiredPreferences domain.TailnetPreferences,
+	activeExitDefaultRoutes domain.ExitDefaultRouteSet,
+	desiredPolicy domain.PacketFilterPolicy,
+) {
 	reconciler.lastPacketPolicy = desiredPolicy
 	reconciler.hasPacketPolicy = true
 	reconciler.quarantined = false
-	reconciler.completeReconcileReport(&report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
-	return report, nil
+	reconciler.completeReconcileReport(report, tailnetState, desiredPreferences, activeExitDefaultRoutes)
 }
 
 func (reconciler *Reconciler) applyExitDefaultRouteTransition(
@@ -666,7 +723,7 @@ func (reconciler *Reconciler) packetFilterPolicy(snapshot domain.NetworkSnapshot
 	policy := reconciler.safetyPacketFilterPolicy()
 	policy.GateClosed = gateClosed
 	for _, path := range snapshot.DNSEgressPaths {
-		policy.DNSTargets = append(policy.DNSTargets, domain.DNSSNATTarget{Address: path.NameServer, OutputInterface: path.Link.Name})
+		policy.DNSTargets = append(policy.DNSTargets, domain.DNSMasqueradeTarget{Address: path.NameServer, OutputInterface: path.Link.Name})
 	}
 	if !reconciler.configuration.PacketFilter.LocalEgress.Enabled {
 		return policy

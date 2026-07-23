@@ -87,7 +87,7 @@ func TestValidateResolvedAddressesRequiresExclusivePublicFamily(t *testing.T) {
 }
 
 func TestResolveScopesDualStackEndpointToRequestedFamily(t *testing.T) {
-	adapter, err := New(
+	prober, err := New(
 		"https://cp.cloudflare.com/generate_204",
 		"https://cp.cloudflare.com/generate_204",
 		time.Second,
@@ -101,10 +101,10 @@ func TestResolveScopesDualStackEndpointToRequestedFamily(t *testing.T) {
 			"ip6": {netip.MustParseAddr("2606:4700::6810:84e5")},
 		},
 	}
-	adapter.resolver = resolver
+	prober.resolver = resolver
 
 	for _, family := range []domain.AddressFamily{domain.IPv4, domain.IPv6} {
-		addresses, resolveErr := adapter.resolve(context.Background(), adapter.endpoints[family])
+		addresses, resolveErr := prober.resolve(context.Background(), prober.endpoints[family])
 		if resolveErr != nil {
 			t.Fatalf("resolve IPv%d endpoint: %v", family, resolveErr)
 		}
@@ -128,12 +128,12 @@ func TestProbePinsValidatedAddressAndEnforcesTLSAndResponse(t *testing.T) {
 	server.StartTLS()
 	t.Cleanup(server.Close)
 
-	adapter := newTestAdapter(t, server)
+	prober := newTestProber(t, server)
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
 	request := port.InternetEgressProbeRequest{
 		Family: domain.IPv4, ProxyLink: domain.LinkIdentity{Index: 7, Name: "proxy-test"}, PacketMark: 0x11,
 	}
-	if err := adapter.Probe(context.Background(), request); err != nil {
+	if err := prober.Probe(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -144,7 +144,7 @@ func TestProbePinsValidatedAddressAndEnforcesTLSAndResponse(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("probe request was not observed")
 	}
-	dial := adapter.dialer.(*recordingDialer).snapshot()
+	dial := prober.dialer.(*recordingDialer).snapshot()
 	if dial.network != "tcp4" || dial.address != "8.8.8.8:443" || dial.link != request.ProxyLink || dial.mark != request.PacketMark {
 		t.Fatalf("probe did not pin the validated address and socket identity: %#v", dial)
 	}
@@ -175,8 +175,8 @@ func TestProbeRejectsRedirectStatusAndUntrustedTLS(t *testing.T) {
 			server := httptest.NewUnstartedServer(test.handler)
 			server.StartTLS()
 			defer server.Close()
-			adapter := newTestAdapter(t, server)
-			err := adapter.Probe(context.Background(), port.InternetEgressProbeRequest{
+			prober := newTestProber(t, server)
+			err := prober.Probe(context.Background(), port.InternetEgressProbeRequest{
 				Family: domain.IPv4, ProxyLink: domain.LinkIdentity{Index: 7, Name: "proxy-test"}, PacketMark: 0x11,
 			})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
@@ -191,9 +191,9 @@ func TestProbeRejectsRedirectStatusAndUntrustedTLS(t *testing.T) {
 	server.Config.ErrorLog = log.New(io.Discard, "", 0)
 	server.StartTLS()
 	defer server.Close()
-	adapter := newTestAdapter(t, server)
-	adapter.rootCAs = nil
-	if err := adapter.Probe(context.Background(), port.InternetEgressProbeRequest{
+	prober := newTestProber(t, server)
+	prober.rootCAs = nil
+	if err := prober.Probe(context.Background(), port.InternetEgressProbeRequest{
 		Family: domain.IPv4, ProxyLink: domain.LinkIdentity{Index: 7, Name: "proxy-test"}, PacketMark: 0x11,
 	}); err == nil || !strings.Contains(err.Error(), "certificate") {
 		t.Fatalf("untrusted TLS endpoint was accepted: %v", err)
@@ -201,15 +201,15 @@ func TestProbeRejectsRedirectStatusAndUntrustedTLS(t *testing.T) {
 }
 
 func TestProbeHonorsParentCancellation(t *testing.T) {
-	adapter, err := New("https://example.com/status", "https://ipv6.example.com/status", time.Second)
+	prober, err := New("https://example.com/status", "https://ipv6.example.com/status", time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter.resolver = &fakeResolver{addresses: map[string][]netip.Addr{"example.com": {netip.MustParseAddr("8.8.8.8")}}}
-	adapter.dialer = blockingDialer{}
+	prober.resolver = &fakeResolver{addresses: map[string][]netip.Addr{"example.com": {netip.MustParseAddr("8.8.8.8")}}}
+	prober.dialer = blockingDialer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err = adapter.Probe(ctx, port.InternetEgressProbeRequest{
+	err = prober.Probe(ctx, port.InternetEgressProbeRequest{
 		Family: domain.IPv4, ProxyLink: domain.LinkIdentity{Index: 7, Name: "proxy-test"}, PacketMark: 0x11,
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -217,18 +217,18 @@ func TestProbeHonorsParentCancellation(t *testing.T) {
 	}
 }
 
-func newTestAdapter(t *testing.T, server *httptest.Server) *Adapter {
+func newTestProber(t *testing.T, server *httptest.Server) *Prober {
 	t.Helper()
-	adapter, err := New("https://example.com/status", "https://ipv6.example.com/status", time.Second)
+	prober, err := New("https://example.com/status", "https://ipv6.example.com/status", time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter.resolver = &fakeResolver{addresses: map[string][]netip.Addr{"example.com": {netip.MustParseAddr("8.8.8.8")}}}
-	adapter.dialer = &recordingDialer{target: server.Listener.Addr().String()}
+	prober.resolver = &fakeResolver{addresses: map[string][]netip.Addr{"example.com": {netip.MustParseAddr("8.8.8.8")}}}
+	prober.dialer = &recordingDialer{target: server.Listener.Addr().String()}
 	rootCAs := x509.NewCertPool()
 	rootCAs.AddCert(server.Certificate())
-	adapter.rootCAs = rootCAs
-	return adapter
+	prober.rootCAs = rootCAs
+	return prober
 }
 
 type fakeResolver struct {

@@ -56,7 +56,8 @@ and netlink dependency on every supported build architecture.
 - `TAILSCALE_GATEWAY_NFTABLES_LOCAL_EGRESS_IPV4_SET`: `local_egress_ipv4`.
 - `TAILSCALE_GATEWAY_NFTABLES_LOCAL_EGRESS_IPV6_SET`: `local_egress_ipv6`.
 - `TAILSCALE_GATEWAY_NFTABLES_NAT_TABLE`: `tailscale_gateway_nat`.
-- `TAILSCALE_GATEWAY_NFTABLES_DNS_SNAT_CHAIN`: `cluster_dns_snat`.
+- `TAILSCALE_GATEWAY_NFTABLES_DNS_MASQUERADE_CHAIN`:
+  `cluster_dns_masquerade`.
 
 Identifiers must be valid, unique nftables names and cannot use the reserved
 ownership metadata chain.

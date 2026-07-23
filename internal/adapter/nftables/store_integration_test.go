@@ -20,11 +20,11 @@ func TestIntegrationStoreConvergesAndRefusesForeignOwnership(t *testing.T) {
 		LocalEgressIPv4Set: "proxy_targets_v4",
 		LocalEgressIPv6Set: "proxy_targets_v6",
 		NATTable:           "ts_gateway_test_nat",
-		DNSMasqueradeChain: "dns_snat",
+		DNSMasqueradeChain: "dns_masquerade",
 		GateClosed:         true,
 		TailnetIPv4Prefix:  netip.MustParsePrefix("100.64.0.0/10"),
 		TailnetIPv6Prefix:  netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
-		DNSTargets: []domain.DNSSNATTarget{
+		DNSTargets: []domain.DNSMasqueradeTarget{
 			{Address: netip.MustParseAddr("10.42.0.53"), OutputInterface: "uplink-v4"},
 			{Address: netip.MustParseAddr("fd00:42::53"), OutputInterface: "uplink-v6"},
 		},

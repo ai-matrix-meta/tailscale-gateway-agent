@@ -96,18 +96,6 @@ func runAgent(ctx context.Context, superviseContainerboot bool) error {
 		return err
 	}
 
-	var ownershipCoordinator interface {
-		Run(context.Context, func(context.Context) error) error
-	}
-	if superviseContainerboot {
-		ownershipCoordinator, err = kubernetesadapter.NewCoordinator(configuration.Coordination)
-		if err != nil {
-			return fmt.Errorf("configure Kubernetes coordination: %w", err)
-		}
-	} else {
-		ownershipCoordinator = filelock.NewCoordinator(configuration.Coordination)
-	}
-
 	network, err := netlinkadapter.New()
 	if err != nil {
 		return fmt.Errorf("configure rtnetlink adapter: %w", err)
@@ -157,7 +145,7 @@ func runAgent(ctx context.Context, superviseContainerboot bool) error {
 	}
 
 	dependencies := application.SupervisorDependencies{
-		Coordinator: ownershipCoordinator,
+		Coordinator: filelock.NewCoordinator(configuration.Coordination),
 		Reconciler:  reconciler,
 		Controller:  controller,
 		Status:      status,
@@ -165,6 +153,10 @@ func runAgent(ctx context.Context, superviseContainerboot bool) error {
 		Logger:      logger,
 	}
 	if superviseContainerboot {
+		dependencies.Coordinator, err = kubernetesadapter.NewCoordinator(configuration.Coordination)
+		if err != nil {
+			return fmt.Errorf("configure Kubernetes coordination: %w", err)
+		}
 		processSpecification := processadapter.NewSpecification(containerbootPath, nil, childEnvironment)
 		dependencies.Processes = processadapter.NewLauncher()
 		dependencies.Process = &processSpecification
@@ -176,7 +168,7 @@ func runAgent(ctx context.Context, superviseContainerboot bool) error {
 	return supervisor.Run(ctx)
 }
 
-func configureInternetProber(advertiseExitNode bool, ipv4URL, ipv6URL string, timeout time.Duration) (*internetprobeadapter.Adapter, error) {
+func configureInternetProber(advertiseExitNode bool, ipv4URL, ipv6URL string, timeout time.Duration) (*internetprobeadapter.Prober, error) {
 	if !advertiseExitNode {
 		return nil, nil
 	}

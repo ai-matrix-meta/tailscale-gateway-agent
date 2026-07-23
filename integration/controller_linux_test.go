@@ -32,8 +32,8 @@ const (
 	integrationLocalEgressRulePriority = 31_981
 	integrationActiveRouteMetric       = 123
 	integrationFailClosedRouteMetric   = 32_123
-	integrationFilterTable             = "ts_gateway_controller_filter"
-	integrationNATTable                = "ts_gateway_controller_nat"
+	integrationFilterTable             = "ts_gateway_ctler_filter"
+	integrationNATTable                = "ts_gateway_ctler_nat"
 
 	integrationTailnetLinkName             = "ctler-tail"
 	integrationProxyLinkName               = "ctler-proxy"
@@ -349,12 +349,12 @@ func integrationConfiguration(advertisedPrefix netip.Prefix) domain.Configuratio
 	configuration.Network.ActiveRouteMetric = integrationActiveRouteMetric
 	configuration.Network.FailClosedRouteMetric = integrationFailClosedRouteMetric
 	configuration.PacketFilter.FilterTable = integrationFilterTable
-	configuration.PacketFilter.ForwardGuardChain = "controller_forward_guard"
-	configuration.PacketFilter.LocalEgressChain = "controller_local_egress"
-	configuration.PacketFilter.LocalEgressIPv4Set = "controller_local_ipv4"
-	configuration.PacketFilter.LocalEgressIPv6Set = "controller_local_ipv6"
+	configuration.PacketFilter.ForwardGuardChain = "ctler_forward_guard"
+	configuration.PacketFilter.LocalEgressChain = "ctler_local_egress"
+	configuration.PacketFilter.LocalEgressIPv4Set = "ctler_local_ipv4"
+	configuration.PacketFilter.LocalEgressIPv6Set = "ctler_local_ipv6"
 	configuration.PacketFilter.NATTable = integrationNATTable
-	configuration.PacketFilter.DNSMasqueradeChain = "controller_dns_snat"
+	configuration.PacketFilter.DNSMasqueradeChain = "ctler_dns_masquerade"
 	configuration.PacketFilter.LocalEgress.Enabled = true
 	configuration.PacketFilter.LocalEgress.Domains = []string{"control.example.com"}
 	configuration.Tailnet.AdvertiseRoutes = []netip.Prefix{advertisedPrefix}

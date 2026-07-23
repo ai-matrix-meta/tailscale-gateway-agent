@@ -103,54 +103,54 @@ func New(listenAddress string, status port.StatusProvider, logger *slog.Logger) 
 	return telemetry, nil
 }
 
-func (t *Telemetry) Close() error {
-	if t.listener == nil {
+func (telemetry *Telemetry) Close() error {
+	if telemetry.listener == nil {
 		return nil
 	}
-	if err := t.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+	if err := telemetry.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
 	return nil
 }
 
-func (t *Telemetry) RecordReconcile(trigger string, duration time.Duration, report domain.ReconcileReport, reconcileErr error) {
+func (telemetry *Telemetry) RecordReconcile(trigger string, duration time.Duration, report domain.ReconcileReport, reconcileErr error) {
 	result := "success"
 	if reconcileErr != nil {
 		result = "error"
 	}
-	t.reconciles.WithLabelValues(trigger, result).Inc()
-	t.duration.WithLabelValues(trigger).Observe(duration.Seconds())
-	t.writes.WithLabelValues("routing").Add(float64(report.RoutingWrites))
-	t.writes.WithLabelValues("nftables").Add(float64(report.PacketFilterWrites))
-	t.writes.WithLabelValues("tailnet_preferences").Add(float64(report.TailnetWrites))
+	telemetry.reconciles.WithLabelValues(trigger, result).Inc()
+	telemetry.duration.WithLabelValues(trigger).Observe(duration.Seconds())
+	telemetry.writes.WithLabelValues("routing").Add(float64(report.RoutingWrites))
+	telemetry.writes.WithLabelValues("nftables").Add(float64(report.PacketFilterWrites))
+	telemetry.writes.WithLabelValues("tailnet_preferences").Add(float64(report.TailnetWrites))
 	if report.Changed {
-		t.drift.WithLabelValues(trigger).Inc()
+		telemetry.drift.WithLabelValues(trigger).Inc()
 	}
 	dataPlaneAvailable := float64(0)
 	if reconcileErr == nil && report.DataPlaneAvailable {
 		dataPlaneAvailable = 1
 	}
-	t.dataPlaneAvailable.Set(dataPlaneAvailable)
-	t.conditions.Reset()
+	telemetry.dataPlaneAvailable.Set(dataPlaneAvailable)
+	telemetry.conditions.Reset()
 	for _, condition := range report.Conditions {
 		prefix := ""
 		if condition.Prefix.IsValid() {
 			prefix = condition.Prefix.String()
 		}
-		t.conditions.WithLabelValues(string(condition.Kind), metricFamily(condition.Family), prefix).Set(1)
+		telemetry.conditions.WithLabelValues(string(condition.Kind), metricFamily(condition.Family), prefix).Set(1)
 	}
-	t.routeApproved.Reset()
+	telemetry.routeApproved.Reset()
 	if report.ApprovalObserved {
-		t.approvalReady.Set(1)
+		telemetry.approvalReady.Set(1)
 		for _, approval := range report.RouteApprovals {
 			value := float64(0)
 			if approval.Approved {
 				value = 1
 			}
-			t.routeApproved.WithLabelValues(approval.Prefix.String()).Set(value)
+			telemetry.routeApproved.WithLabelValues(approval.Prefix.String()).Set(value)
 		}
 	} else {
-		t.approvalReady.Set(0)
+		telemetry.approvalReady.Set(0)
 	}
 }
 
@@ -165,8 +165,8 @@ func metricFamily(family domain.AddressFamily) string {
 	}
 }
 
-func (t *Telemetry) RecordInternetCapabilityProbe(family domain.AddressFamily, result port.InternetCapabilityProbeResult) {
-	t.capabilityProbe.WithLabelValues(metricFamily(family), metricCapabilityProbeResult(result)).Inc()
+func (telemetry *Telemetry) RecordInternetCapabilityProbe(family domain.AddressFamily, result port.InternetCapabilityProbeResult) {
+	telemetry.capabilityProbe.WithLabelValues(metricFamily(family), metricCapabilityProbeResult(result)).Inc()
 }
 
 func metricCapabilityProbeResult(result port.InternetCapabilityProbeResult) string {
@@ -178,7 +178,7 @@ func metricCapabilityProbeResult(result port.InternetCapabilityProbeResult) stri
 	}
 }
 
-func (t *Telemetry) RecordInternetCapabilitySnapshot(snapshot domain.InternetCapabilitySnapshot, now time.Time) {
+func (telemetry *Telemetry) RecordInternetCapabilitySnapshot(snapshot domain.InternetCapabilitySnapshot, now time.Time) {
 	for _, item := range []struct {
 		family     domain.AddressFamily
 		capability domain.InternetFamilyCapability
@@ -191,27 +191,27 @@ func (t *Telemetry) RecordInternetCapabilitySnapshot(snapshot domain.InternetCap
 			available = 1
 		}
 		family := metricFamily(item.family)
-		t.capabilityAvailable.WithLabelValues(family).Set(available)
+		telemetry.capabilityAvailable.WithLabelValues(family).Set(available)
 		age := float64(0)
 		if item.capability.Initialized && !now.Before(item.capability.ObservedAt) {
 			age = now.Sub(item.capability.ObservedAt).Seconds()
 		}
-		t.capabilityAge.WithLabelValues(family).Set(age)
+		telemetry.capabilityAge.WithLabelValues(family).Set(age)
 	}
 }
 
-func (t *Telemetry) SetReady(ready bool) {
+func (telemetry *Telemetry) SetReady(ready bool) {
 	if ready {
-		t.ready.Set(1)
+		telemetry.ready.Set(1)
 		return
 	}
-	t.ready.Set(0)
+	telemetry.ready.Set(0)
 }
 
-func (t *Telemetry) Run(ctx context.Context) error {
+func (telemetry *Telemetry) Run(ctx context.Context) error {
 	server := &http.Server{
-		Addr:              t.listenAddress,
-		Handler:           t.handler(),
+		Addr:              telemetry.listenAddress,
+		Handler:           telemetry.handler(),
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -220,9 +220,9 @@ func (t *Telemetry) Run(ctx context.Context) error {
 	}
 	result := make(chan error, 1)
 	go func() {
-		result <- server.Serve(t.listener)
+		result <- server.Serve(telemetry.listener)
 	}()
-	t.logger.InfoContext(ctx, "health server started", "address", t.listener.Addr().String())
+	telemetry.logger.InfoContext(ctx, "health server started", "address", telemetry.listener.Addr().String())
 
 	select {
 	case err := <-result:
@@ -240,18 +240,18 @@ func (t *Telemetry) Run(ctx context.Context) error {
 	}
 }
 
-func (t *Telemetry) handler() http.Handler {
+func (telemetry *Telemetry) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", getOnly(promhttp.HandlerFor(t.registry, promhttp.HandlerOpts{})))
+	mux.Handle("/metrics", getOnly(promhttp.HandlerFor(telemetry.registry, promhttp.HandlerOpts{})))
 	mux.Handle("/livez", getOnly(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		if !t.status.HealthSnapshot().Live {
+		if !telemetry.status.HealthSnapshot().Live {
 			writeStatus(writer, http.StatusServiceUnavailable, "not live\n")
 			return
 		}
 		writeStatus(writer, http.StatusOK, "ok\n")
 	})))
 	mux.Handle("/readyz", getOnly(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		snapshot := t.status.HealthSnapshot()
+		snapshot := telemetry.status.HealthSnapshot()
 		statusCode := http.StatusOK
 		if !snapshot.Ready {
 			statusCode = http.StatusServiceUnavailable

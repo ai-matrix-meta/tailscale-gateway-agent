@@ -33,7 +33,7 @@ const (
 	nftablesLocalEgressIPv4Set  = ownedPrefix + "NFTABLES_LOCAL_EGRESS_IPV4_SET"
 	nftablesLocalEgressIPv6Set  = ownedPrefix + "NFTABLES_LOCAL_EGRESS_IPV6_SET"
 	nftablesNATTable            = ownedPrefix + "NFTABLES_NAT_TABLE"
-	nftablesDNSSNATChain        = ownedPrefix + "NFTABLES_DNS_SNAT_CHAIN"
+	nftablesDNSMasqueradeChain  = ownedPrefix + "NFTABLES_DNS_MASQUERADE_CHAIN"
 	localEgressEnabled          = ownedPrefix + "LOCAL_EGRESS_ENABLED"
 	localEgressDomains          = ownedPrefix + "LOCAL_EGRESS_DOMAINS"
 	localEgressProtocols        = ownedPrefix + "LOCAL_EGRESS_PROTOCOLS"
@@ -76,7 +76,7 @@ var knownVariables = map[string]struct{}{
 	exitRouteTable: {}, exitRulePriority: {}, localEgressRouteTable: {}, localEgressRulePriority: {},
 	localEgressPacketMark: {}, activeRouteMetric: {}, failClosedRouteMetric: {}, nftablesFilterTable: {}, nftablesForwardGuardChain: {},
 	nftablesLocalEgressChain: {}, nftablesLocalEgressIPv4Set: {}, nftablesLocalEgressIPv6Set: {},
-	nftablesNATTable: {}, nftablesDNSSNATChain: {}, localEgressEnabled: {}, localEgressDomains: {},
+	nftablesNATTable: {}, nftablesDNSMasqueradeChain: {}, localEgressEnabled: {}, localEgressDomains: {},
 	localEgressProtocols: {}, localEgressPorts: {}, localEgressRefreshInterval: {}, localEgressMaximumStaleness: {},
 	tailscaleSocketPath: {}, advertiseRoutes: {}, advertiseExitNode: {}, preferenceAuditInterval: {},
 	tailscaleOperationTimeout: {}, auditInterval: {}, reconcileTimeout: {}, eventDebounce: {}, readinessMaximumAge: {}, dnsLookupTimeout: {},
@@ -127,7 +127,7 @@ func load(entries []string) (domain.Configuration, error) {
 	stringValue(values, nftablesLocalEgressIPv4Set, &configuration.PacketFilter.LocalEgressIPv4Set)
 	stringValue(values, nftablesLocalEgressIPv6Set, &configuration.PacketFilter.LocalEgressIPv6Set)
 	stringValue(values, nftablesNATTable, &configuration.PacketFilter.NATTable)
-	stringValue(values, nftablesDNSSNATChain, &configuration.PacketFilter.DNSMasqueradeChain)
+	stringValue(values, nftablesDNSMasqueradeChain, &configuration.PacketFilter.DNSMasqueradeChain)
 	boolValue(values, localEgressEnabled, &configuration.PacketFilter.LocalEgress.Enabled, &parseErrors)
 	stringListValue(values, localEgressDomains, &configuration.PacketFilter.LocalEgress.Domains, &parseErrors)
 	protocolListValue(values, localEgressProtocols, &configuration.PacketFilter.LocalEgress.Protocols, &parseErrors)

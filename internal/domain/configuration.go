@@ -135,7 +135,7 @@ func DefaultConfiguration() Configuration {
 			LocalEgressIPv4Set: "local_egress_ipv4",
 			LocalEgressIPv6Set: "local_egress_ipv6",
 			NATTable:           "tailscale_gateway_nat",
-			DNSMasqueradeChain: "cluster_dns_snat",
+			DNSMasqueradeChain: "cluster_dns_masquerade",
 			LocalEgress: LocalEgressConfiguration{
 				Protocols:        []TransportProtocol{TransportTCP},
 				Ports:            []uint16{443},
@@ -489,10 +489,6 @@ func validateCoordinationConfiguration(configuration CoordinationConfiguration) 
 	return errors.Join(validationErrors...)
 }
 
-func validMaskedPrefix(prefix netip.Prefix, family AddressFamily) bool {
-	return prefix.IsValid() && prefix == prefix.Masked() && FamilyOfPrefix(prefix) == family
-}
-
 func validDomainName(value string) bool {
 	if len(value) == 0 || len(value) > 253 || value[len(value)-1] == '.' {
 		return false
@@ -520,13 +516,6 @@ func validDNS1123Subdomain(value string) bool {
 		}
 	}
 	return true
-}
-
-func prefixesOverlap(left, right netip.Prefix) bool {
-	if !left.IsValid() || !right.IsValid() || FamilyOfPrefix(left) != FamilyOfPrefix(right) {
-		return false
-	}
-	return left.Contains(right.Addr()) || right.Contains(left.Addr())
 }
 
 func validLinuxAbsolutePath(value string) bool {

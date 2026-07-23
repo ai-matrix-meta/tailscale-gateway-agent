@@ -114,7 +114,7 @@ func natRuleSpecs(policy domain.PacketFilterPolicy) ([]ruleSpec, error) {
 		return nil, fmt.Errorf("validate NAT policy: %w", err)
 	}
 	targets := slices.Clone(policy.DNSTargets)
-	slices.SortFunc(targets, compareDNSTargets)
+	slices.SortFunc(targets, compareDNSMasqueradeTargets)
 	var specifications []ruleSpec
 	for _, target := range targets {
 		prefix := policy.TailnetIPv6Prefix
@@ -242,7 +242,7 @@ func addressSetElements(addresses []netip.Addr) []gnft.SetElement {
 	return result
 }
 
-func compareDNSTargets(left, right domain.DNSSNATTarget) int {
+func compareDNSMasqueradeTargets(left, right domain.DNSMasqueradeTarget) int {
 	if comparison := left.Address.Unmap().Compare(right.Address.Unmap()); comparison != 0 {
 		return comparison
 	}

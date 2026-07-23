@@ -91,9 +91,9 @@ func TestClassifyExitDefaultRouteTransitionPartitionsDeactivationBeforeActivatio
 		}},
 	}
 	transition, ok := classifyExitDefaultRouteTransition(changes, network)
-	if !ok || !transition.routesToActivate.Equal(domain.ExitDefaultRouteSet{IPv6: true}) ||
-		!transition.routesToDeactivate.Equal(domain.ExitDefaultRouteSet{IPv4: true}) ||
-		len(transition.activationChanges.UpsertRoutes) != 1 || len(transition.deactivationChanges.DeleteRoutes) != 1 {
+	if !ok ||
+		!transition.activationChanges.Equal(domain.RoutingChanges{UpsertRoutes: changes.UpsertRoutes}) ||
+		!transition.deactivationChanges.Equal(domain.RoutingChanges{DeleteRoutes: changes.DeleteRoutes}) {
 		t.Fatalf("cross-family Exit route transition was misclassified: transition=%#v ok=%v", transition, ok)
 	}
 	for _, unsafeChanges := range []domain.RoutingChanges{

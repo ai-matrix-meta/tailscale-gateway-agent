@@ -120,8 +120,6 @@ func activeRoute(network domain.NetworkConfiguration, family domain.AddressFamil
 }
 
 type exitDefaultRouteTransition struct {
-	routesToActivate    domain.ExitDefaultRouteSet
-	routesToDeactivate  domain.ExitDefaultRouteSet
 	activationChanges   domain.RoutingChanges
 	deactivationChanges domain.RoutingChanges
 }
@@ -131,16 +129,18 @@ func classifyExitDefaultRouteTransition(changes domain.RoutingChanges, network d
 		return exitDefaultRouteTransition{}, false
 	}
 	transition := exitDefaultRouteTransition{}
+	routesToActivate := domain.ExitDefaultRouteSet{}
+	routesToDeactivate := domain.ExitDefaultRouteSet{}
 	for _, route := range changes.UpsertRoutes {
 		if !isActiveExitDefaultRoute(route, network) ||
-			!addExitDefaultRoute(&transition.routesToActivate, route.Family) {
+			!addExitDefaultRoute(&routesToActivate, route.Family) {
 			return exitDefaultRouteTransition{}, false
 		}
 		transition.activationChanges.UpsertRoutes = append(transition.activationChanges.UpsertRoutes, route)
 	}
 	for _, route := range changes.DeleteRoutes {
-		if !isActiveExitDefaultRoute(route, network) || transition.routesToActivate.Contains(route.Family) ||
-			!addExitDefaultRoute(&transition.routesToDeactivate, route.Family) {
+		if !isActiveExitDefaultRoute(route, network) || routesToActivate.Contains(route.Family) ||
+			!addExitDefaultRoute(&routesToDeactivate, route.Family) {
 			return exitDefaultRouteTransition{}, false
 		}
 		transition.deactivationChanges.DeleteRoutes = append(transition.deactivationChanges.DeleteRoutes, route)

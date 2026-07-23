@@ -1395,7 +1395,7 @@ func requireRule(t *testing.T, state domain.RoutingState, family domain.AddressF
 	return domain.Rule{}
 }
 
-func findDNSTarget(t *testing.T, policy domain.PacketFilterPolicy, address netip.Addr) domain.DNSSNATTarget {
+func findDNSTarget(t *testing.T, policy domain.PacketFilterPolicy, address netip.Addr) domain.DNSMasqueradeTarget {
 	t.Helper()
 	for _, target := range policy.DNSTargets {
 		if target.Address == address {
@@ -1403,7 +1403,7 @@ func findDNSTarget(t *testing.T, policy domain.PacketFilterPolicy, address netip
 		}
 	}
 	t.Fatalf("DNS target %s not found", address)
-	return domain.DNSSNATTarget{}
+	return domain.DNSMasqueradeTarget{}
 }
 
 func lastValueIndex(values []string, target string) int {

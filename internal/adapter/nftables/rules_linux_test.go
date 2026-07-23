@@ -132,7 +132,7 @@ func basePolicy() domain.PacketFilterPolicy {
 		LocalEgressIPv4Set: "proxy_targets_v4",
 		LocalEgressIPv6Set: "proxy_targets_v6",
 		NATTable:           "gateway_nat",
-		DNSMasqueradeChain: "dns_snat",
+		DNSMasqueradeChain: "dns_masquerade",
 		TailnetIPv4Prefix:  netip.MustParsePrefix("100.64.0.0/10"),
 		TailnetIPv6Prefix:  netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
 	}
@@ -140,7 +140,7 @@ func basePolicy() domain.PacketFilterPolicy {
 
 func enabledPolicy() domain.PacketFilterPolicy {
 	policy := basePolicy()
-	policy.DNSTargets = []domain.DNSSNATTarget{
+	policy.DNSTargets = []domain.DNSMasqueradeTarget{
 		{Address: netip.MustParseAddr("10.43.0.10"), OutputInterface: "dns-path-v4"},
 		{Address: netip.MustParseAddr("fd00:43::a"), OutputInterface: "dns-path-v6"},
 	}
